@@ -8,6 +8,7 @@ cuota efectiva).
 import httpx
 import logging
 from app.config import settings
+from app import logging_utils
 
 logger = logging.getLogger("gemini_client")
 
@@ -51,6 +52,12 @@ async def generar_embedding(texto: str) -> list[float] | None:
                 continue
 
     logger.error("Todas las claves de Gemini fallaron o están sin cuota para embeddings.")
+    await logging_utils.registrar_error(
+        "GEMINI_API_EMBEDDING",
+        "Todas las claves de Gemini fallaron o están sin cuota",
+        "Ver logs de Railway para el detalle por clave",
+        "Revisar cuotas en ai.dev/rate-limit o agregar más claves GEMINI_KEY_*"
+    )
     return None
 
 
@@ -86,4 +93,10 @@ async def generar_respuesta(payload_contents: list[dict], usar_url_context: bool
                 except Exception as e:
                     ultimo_error = f"[clave #{k+1}][{modelo}] excepción: {e}"
 
+    await logging_utils.registrar_error(
+        "GEMINI_API_GENERACION",
+        "Todos los modelos y todas las claves fallaron",
+        ultimo_error,
+        "Revisar cuotas en ai.dev/rate-limit o agregar más claves GEMINI_KEY_*"
+    )
     raise RuntimeError(f"Todos los modelos y todas las claves fallaron. Último error: {ultimo_error}")
