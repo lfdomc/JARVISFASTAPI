@@ -76,6 +76,34 @@ async def borrar_documento(documento_id: str):
     return {"ok": True, "archivado": documento_id}
 
 
+@router.get("/archived")
+async def listar_documentos_archivados():
+    """Lista los documentos archivados (borrado suave), para poder revisarlos y restaurarlos."""
+    url = (
+        f"{_base()}/rest/v1/documentos_gdp"
+        f"?estado=eq.ARCHIVED&select=id,nombre_archivo,categoria,mime_type,creado_en"
+        f"&order=creado_en.desc"
+    )
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        resp = await client.get(url, headers=_headers())
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=resp.text)
+        return resp.json()
+
+
+@router.post("/{documento_id}/restore")
+async def restaurar_documento(documento_id: str):
+    """Revierte un archivado: vuelve a poner el documento como ACTIVE,
+    reapareciendo en las búsquedas y en la lista principal."""
+    url = f"{_base()}/rest/v1/documentos_gdp?id=eq.{documento_id}"
+    payload = {"estado": "ACTIVE"}
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.patch(url, json=payload, headers=_headers({"Prefer": "return=minimal"}))
+        if resp.status_code not in (200, 204):
+            raise HTTPException(status_code=502, detail=resp.text)
+    return {"ok": True, "restaurado": documento_id}
+
+
 async def _crear_documento_maestro(nombre_archivo: str, contenido_markdown: str, categoria: str, mime_type: str) -> str | None:
     import hashlib
     hash_sha256 = hashlib.sha256(contenido_markdown.encode("utf-8")).hexdigest()
