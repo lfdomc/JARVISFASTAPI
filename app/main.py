@@ -1,13 +1,28 @@
 import re
 import logging
 from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app import gemini_client, supabase_client, telegram_client
+from app import clients, documents
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jarvis")
 
 app = FastAPI(title="JARVIS API")
+
+# CORS: permite que el dashboard (en otro dominio, ej. Vercel) le hable a
+# esta API. Ajusta allow_origins a tu dominio real cuando lo despliegues,
+# en vez de "*", para no dejarlo abierto a cualquier sitio.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(clients.router)
+app.include_router(documents.router)
 
 MATCH_COUNT_RAPIDO = 5
 MATCH_COUNT_PROFUNDO = 20
