@@ -23,11 +23,28 @@ class Settings:
     # rotando automáticamente si una se queda sin cuota (429).
     @staticmethod
     def obtener_pool_claves_gemini() -> list[str]:
+        """
+        CORREGIDO: si el valor de una variable tiene comas (ej. copiaste
+        directo el valor de GEMINI_KEYS_POOL de Apps Script, que junta
+        varias claves en un solo texto), se divide en claves individuales.
+        Antes se mandaba el texto completo como si fuera UNA sola clave,
+        causando 401 (Google la rechaza por no ser una clave real).
+        """
         claves = []
         for nombre, valor in os.environ.items():
             if nombre.upper().startswith("GEMINI_KEY_") and valor.strip():
-                claves.append(valor.strip())
-        return claves
+                for pedazo in valor.split(","):
+                    pedazo_limpio = pedazo.strip()
+                    if pedazo_limpio:
+                        claves.append(pedazo_limpio)
+        # Elimina duplicados preservando el orden
+        vistas = set()
+        unicas = []
+        for c in claves:
+            if c not in vistas:
+                vistas.add(c)
+                unicas.append(c)
+        return unicas
 
 
 settings = Settings()
