@@ -137,10 +137,14 @@ async def restaurar_documento(documento_id: str):
 
 async def _crear_documento_maestro(nombre_archivo: str, contenido_markdown: str, categoria: str, mime_type: str) -> str | None:
     import hashlib
+    import uuid
     hash_sha256 = hashlib.sha256(contenido_markdown.encode("utf-8")).hexdigest()
+    documento_uuid = str(uuid.uuid4())
 
     url = f"{_base()}/rest/v1/documentos_gdp"
     payload = {
+        "id": documento_uuid,
+        "documento_raiz_id": documento_uuid,
         "categoria": categoria,
         "estandar_interop": "INTERNAL",
         "pii_sensitivity_level": "S1",

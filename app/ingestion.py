@@ -1,4 +1,5 @@
 import hashlib
+import uuid
 import httpx
 from app.config import settings
 from app import logging_utils
@@ -46,8 +47,11 @@ async def buscar_documento_duplicado(hash_contenido: str) -> dict | None:
 
 
 async def crear_documento_maestro(nombre_archivo: str, contenido_markdown: str, categoria: str, mime_type: str, creado_por: str = "sistema") -> str | None:
+    documento_uuid = str(uuid.uuid4())
     hash_contenido = hashlib.sha256(contenido_markdown.encode("utf-8")).hexdigest()
     payload = {
+        "id": documento_uuid,
+        "documento_raiz_id": documento_uuid,
         "categoria": categoria,
         "estandar_interop": "INTERNAL",
         "pii_sensitivity_level": "S1",
