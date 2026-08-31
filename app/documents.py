@@ -154,13 +154,18 @@ async def _crear_documento_maestro(nombre_archivo: str, contenido_markdown: str,
         "version_major": 1,
         "version_minor": 0,
     }
-    async with httpx.AsyncClient(timeout=20.0) as client:
+    async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(url, json=payload, headers=_headers({"Prefer": "return=representation"}))
         if resp.status_code in (200, 201):
             data = resp.json()
             if data:
                 return data[0]["id"]
-        logger.error(f"Error creando documento maestro: {resp.status_code} {resp.text}")
+        # CORREGIDO: antes ocultaba el error real detrás de un mensaje
+        # genérico — ahora lo expone directo en la respuesta HTTP, para
+        # no repetir el mismo problema de "logs escondidos" de hoy.
+        detalle_real = f"Supabase respondió HTTP {resp.status_code}: {resp.text[:500]}"
+        logger.error(f"Error creando documento maestro: {detalle_real}")
+        raise HTTPException(status_code=502, detail=detalle_real)
     return None
 
 
