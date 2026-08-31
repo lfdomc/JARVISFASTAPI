@@ -4,7 +4,7 @@ from fastapi import FastAPI, Request, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app import gemini_client, supabase_client, telegram_client
-from app import clients, documents
+from app import clients, documents, stats
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jarvis")
@@ -23,6 +23,7 @@ app.add_middleware(
 
 app.include_router(clients.router)
 app.include_router(documents.router)
+app.include_router(stats.router)
 
 MATCH_COUNT_RAPIDO = 5
 MATCH_COUNT_PROFUNDO = 20
