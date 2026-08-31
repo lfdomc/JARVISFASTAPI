@@ -90,6 +90,24 @@ async def listar_documentos():
         return documentos
 
 
+@router.get("/{documento_id}/fragments")
+async def listar_fragmentos_documento(documento_id: str):
+    """Fragmentos reales de un documento, para revisar la calidad del
+    chunking directamente desde el dashboard."""
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        resp = await client.get(
+            f"{_base()}/rest/v1/fragmentos_vectoriales_gdp"
+            f"?documento_id=eq.{documento_id}&select=id,contenido_chunk,categoria,metadata",
+            headers=_headers()
+        )
+        if resp.status_code != 200:
+            raise HTTPException(status_code=502, detail=resp.text)
+        fragmentos = resp.json()
+        # Ordena por chunk_index si está disponible en metadata
+        fragmentos.sort(key=lambda f: (f.get("metadata") or {}).get("chunk_index", 0))
+        return fragmentos
+
+
 @router.delete("/{documento_id}")
 async def borrar_documento(documento_id: str):
     """
