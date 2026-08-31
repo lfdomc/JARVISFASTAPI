@@ -17,6 +17,11 @@ def _headers() -> dict:
     }
 
 
+def _base_url() -> str:
+    """Evita dobles barras si SUPABASE_URL viene con / al final."""
+    return settings.SUPABASE_URL.rstrip("/")
+
+
 async def buscar_contexto_semantico(
     pregunta: str,
     embedding: list[float],
@@ -28,7 +33,7 @@ async def buscar_contexto_semantico(
     Llama a busqueda_hibrida_rrf — la misma función RPC ya calibrada hoy,
     incluye el filtro de aislamiento por propietario_telegram_id.
     """
-    url = f"{settings.SUPABASE_URL}/rest/v1/rpc/busqueda_hibrida_rrf"
+    url = f"{_base_url()}/rest/v1/rpc/busqueda_hibrida_rrf"
     payload = {
         "query_text": pregunta,
         "query_embedding": embedding,
@@ -53,7 +58,7 @@ async def guardar_nota_personal(
     telegram_id: str,
     metadata_extra: dict | None = None,
 ) -> bool:
-    url = f"{settings.SUPABASE_URL}/rest/v1/fragmentos_vectoriales_gdp"
+    url = f"{_base_url()}/rest/v1/fragmentos_vectoriales_gdp"
     payload = [{
         "documento_id": None,
         "categoria": categoria,
@@ -75,7 +80,7 @@ async def guardar_nota_personal(
 
 async def obtener_historial_conversacion(telegram_id: str, limite: int = 6) -> list[dict]:
     url = (
-        f"{settings.SUPABASE_URL}/rest/v1/historial_conversacion"
+        f"{_base_url()}/rest/v1/historial_conversacion"
         f"?telegram_id=eq.{telegram_id}&order=creado_en.desc&limit={limite}"
     )
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -84,14 +89,14 @@ async def obtener_historial_conversacion(telegram_id: str, limite: int = 6) -> l
             filas = resp.json()
             filas.reverse()  # orden cronológico
             return [
-                {"role": f["rol"], "parts": [{"text": f["contenido"]}]}
+                {"role": f["role"], "parts": [{"text": f["contenido"]}]}
                 for f in filas
             ]
         return []
 
 
 async def guardar_mensaje_historial(telegram_id: str, rol: str, contenido: str) -> None:
-    url = f"{settings.SUPABASE_URL}/rest/v1/historial_conversacion"
-    payload = {"telegram_id": telegram_id, "rol": rol, "contenido": contenido}
+    url = f"{_base_url()}/rest/v1/historial_conversacion"
+    payload = {"telegram_id": telegram_id, "role": rol, "contenido": contenido}
     async with httpx.AsyncClient(timeout=15.0) as client:
         await client.post(url, json=payload, headers={**_headers(), "Prefer": "return=minimal"})
