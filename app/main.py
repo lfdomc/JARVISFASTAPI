@@ -191,12 +191,13 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
                 texto_usuario, embedding_pregunta, match_count=match_count, telegram_id_solicitante=telegram_id,
             )
 
-        # Modo profundo: además de los fragmentos que ganaron por
-        # relevancia semántica, se agregan sus vecinos de página — misma
-        # página o adyacente — para dar contexto completo de esa zona
-        # del documento en vez de fragmentos aislados.
-        if modo_profundo and contexto_fragmentos:
-            contexto_fragmentos = await ingestion.expandir_contexto_con_vecinos(contexto_fragmentos)
+        # Expansión de contexto por vecindad — DESACTIVADA por ahora: se
+        # detectó que hacía que el modelo confundiera la página de un
+        # fragmento "vecino" con la del fragmento ancla al citar. Se deja
+        # el código listo por si se retoma con el verificador estricto
+        # nuevo (que si funciona bien, podría permitir reactivarla).
+        # if modo_profundo and contexto_fragmentos:
+        #     contexto_fragmentos = await ingestion.expandir_contexto_con_vecinos(contexto_fragmentos)
 
         def _etiqueta_fuente(f: dict) -> str:
             nombre_doc = f.get('nombre_documento', 'N/A')
@@ -243,11 +244,6 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
                 f"{indices_texto}[FRAGMENTOS RECUPERADOS DE LA BASE DE CONOCIMIENTO]\n{contexto_texto}\n\n"
                 "[INSTRUCCIONES DE ANÁLISIS]\n"
                 "- Analiza TODOS los fragmentos provistos antes de responder.\n"
-                "- Algunos fragmentos están marcados como \"contexto de página vecina\" — no fueron "
-                "elegidos por relevancia semántica directa, sino agregados porque están en la misma "
-                "página o una página adyacente a un fragmento relevante. Úsalos para entender mejor el "
-                "contexto y la continuidad del documento en esa zona, pero prioriza los fragmentos que sí "
-                "fueron resultado directo de la búsqueda al construir tu respuesta.\n"
                 "- Cuando cites un dato, indica de qué documento proviene.\n"
                 "- REGLA DE TRAZABILIDAD (crítica): cada cita de página o fuente debe corresponder "
                 "EXACTAMENTE al fragmento del que la extrajiste. Nunca combines datos de dos fragmentos "
