@@ -5,6 +5,7 @@ en Apps Script (incluye la lección real: el límite gratis es de 1,000
 embeddings/día POR cuenta — rotar entre varias cuentas multiplica la
 cuota efectiva).
 """
+import asyncio
 import httpx
 import logging
 from app.config import settings
@@ -26,30 +27,51 @@ async def generar_embedding(texto: str) -> list[float] | None:
         logger.error("No hay ninguna clave de Gemini configurada (GEMINI_KEY_*).")
         return None
 
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        for i, clave in enumerate(claves):
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key={clave}"
-            payload = {
-                "model": "models/gemini-embedding-001",
-                "content": {"parts": [{"text": texto}]},
-                "outputDimensionality": 768,
-            }
-            try:
-                resp = await client.post(url, json=payload)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    valores = data.get("embedding", {}).get("values")
-                    if valores:
-                        return valores
-                elif resp.status_code == 429:
-                    logger.warning(f"[EMBEDDING] Clave #{i+1}/{len(claves)} sin cuota (429), probando la siguiente...")
+    # Reintenta el ciclo completo de claves si TODAS estuvieron sin cupo
+    # a la vez — pasa en ráfagas de muchas peticiones seguidas (subir un
+    # documento grande), donde se agota el límite por minuto de las 8
+    # claves casi al mismo tiempo. Ese límite se libera solo en segundos,
+    # así que esperar y reintentar recupera fragmentos que antes se
+    # perdían en silencio.
+    esperas_entre_intentos = [5, 15, 30]
+
+    for intento in range(len(esperas_entre_intentos) + 1):
+        todas_sin_cupo = True
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            for i, clave in enumerate(claves):
+                url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-embedding-001:embedContent?key={clave}"
+                payload = {
+                    "model": "models/gemini-embedding-001",
+                    "content": {"parts": [{"text": texto}]},
+                    "outputDimensionality": 768,
+                }
+                try:
+                    resp = await client.post(url, json=payload)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        valores = data.get("embedding", {}).get("values")
+                        if valores:
+                            return valores
+                        todas_sin_cupo = False
+                    elif resp.status_code == 429:
+                        logger.warning(f"[EMBEDDING] Clave #{i+1}/{len(claves)} sin cuota (429), probando la siguiente...")
+                        continue
+                    else:
+                        logger.warning(f"[EMBEDDING] Clave #{i+1} HTTP {resp.status_code}: {resp.text}")
+                        todas_sin_cupo = False
+                        continue
+                except Exception as e:
+                    logger.warning(f"[EMBEDDING] Clave #{i+1} excepción: {e}")
+                    todas_sin_cupo = False
                     continue
-                else:
-                    logger.warning(f"[EMBEDDING] Clave #{i+1} HTTP {resp.status_code}: {resp.text}")
-                    continue
-            except Exception as e:
-                logger.warning(f"[EMBEDDING] Clave #{i+1} excepción: {e}")
-                continue
+
+        if not todas_sin_cupo or intento >= len(esperas_entre_intentos):
+            break
+
+        espera = esperas_entre_intentos[intento]
+        logger.warning(f"[EMBEDDING] Las {len(claves)} claves sin cupo a la vez — esperando {espera}s antes de reintentar (intento {intento+1}/{len(esperas_entre_intentos)})...")
+        await asyncio.sleep(espera)
 
     logger.error("Todas las claves de Gemini fallaron o están sin cuota para embeddings.")
     await logging_utils.registrar_error(

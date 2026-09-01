@@ -3,6 +3,39 @@ import re
 MIN_CARACTERES_CHUNK_VALIDO = 60
 MARCADOR_PAGINA = "\x00PAGINA:{n}\x00"
 PATRON_MARCADOR = re.compile(r"\x00PAGINA:(\d+)\x00")
+PATRON_FILA_TABLA_MD = re.compile(r"^\s*\|.*\|\s*$")
+
+
+def _agrupar_en_unidades(lineas: list[str]) -> list[str]:
+    """
+    Agrupa líneas consecutivas de una tabla Markdown (formato con pipes
+    "| celda | celda |") en una sola unidad indivisible, para que el
+    troceo nunca corte una tabla a la mitad — una tabla partida entre dos
+    fragmentos es fácil de malinterpretar (encabezados en un fragmento,
+    datos en otro, sin saber a qué columna corresponden).
+
+    NOTA DE ALCANCE: esto detecta tablas en sintaxis Markdown real (las
+    que trae el contenido de Firecrawl/web). Las tablas dentro de PDFs
+    extraídas con pypdf pierden su estructura y se convierten en texto
+    plano sin pipes — ahí esta detección no aplica; para preservar esas
+    haría falta extracción de tablas con pdfplumber, un cambio aparte.
+    """
+    unidades = []
+    buffer_tabla = []
+
+    for linea in lineas:
+        if PATRON_FILA_TABLA_MD.match(linea):
+            buffer_tabla.append(linea)
+        else:
+            if buffer_tabla:
+                unidades.append("\n".join(buffer_tabla))
+                buffer_tabla = []
+            unidades.append(linea)
+
+    if buffer_tabla:
+        unidades.append("\n".join(buffer_tabla))
+
+    return unidades
 
 
 def crear_chunks_markdown(texto: str, max_palabras: int = 350) -> list[str]:
@@ -52,15 +85,23 @@ def crear_chunks_con_paginas(paginas: list[str], max_palabras: int = 350) -> lis
 
         lineas = contenido.split("\n")
         titulo = lineas[0] if lineas[0].startswith("#") else ""
+        cuerpo = lineas[1:] if titulo else lineas
+        unidades = _agrupar_en_unidades(cuerpo)
+
         chunk_actual = (titulo + "\n") if titulo else ""
 
-        for linea in lineas[1:]:
-            linea_con_salto = linea + "\n"
-            if len(chunk_actual) + len(linea_con_salto) > max_caracteres and chunk_actual.strip():
+        for unidad in unidades:
+            unidad_con_salto = unidad + "\n"
+            cabe_en_chunk_actual = len(chunk_actual) + len(unidad_con_salto) <= max_caracteres
+
+            if not cabe_en_chunk_actual and chunk_actual.strip():
                 chunks_brutos.append(chunk_actual.strip())
-                chunk_actual = (titulo + "\n" if titulo else "") + linea_con_salto
+                chunk_actual = (titulo + "\n" if titulo else "") + unidad_con_salto
             else:
-                chunk_actual += linea_con_salto
+                chunk_actual += unidad_con_salto
+            # Si la unidad es una tabla más grande que max_caracteres ella
+            # sola, se deja intacta igual (mejor un fragmento grande con
+            # la tabla completa que una tabla partida a la mitad).
 
         if chunk_actual.strip():
             chunks_brutos.append(chunk_actual.strip())

@@ -9,7 +9,7 @@ import os
 class Settings:
     # Supabase
     SUPABASE_URL: str = os.environ.get("SUPABASE_URL", "")
-    SUPABASE_KEY: str = os.environ.get("SUPABASE_KEY", "")  # clave publicable (anon)
+    SUPABASE_KEY: str = os.environ.get("SUPABASE_KEY", "")  # DEBE ser la clave service_role, nunca anon — ver .env.example
 
     # Telegram
     TELEGRAM_BOT_TOKEN: str = os.environ.get("TELEGRAM_BOT_TOKEN", "")
