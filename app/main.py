@@ -155,7 +155,6 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
             try:
                 embedding = await gemini_client.generar_embedding(contenido)
                 if embedding:
-                    from app import ingestion
                     categoria_sugerida = await ingestion.sugerir_categoria_similar(embedding)
             except Exception:
                 pass
