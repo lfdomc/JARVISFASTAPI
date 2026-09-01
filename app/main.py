@@ -1,13 +1,13 @@
 import re
 import hashlib
 import logging
-from fastapi import FastAPI, Request, Header, HTTPException
+from fastapi import FastAPI, Request, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app import gemini_client, supabase_client, telegram_client, state, logging_utils
 from app import category_flow, link_ingestion, voice
-from app import clients, documents, stats
+from app import clients, documents, stats, auth
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("jarvis")
@@ -32,7 +32,7 @@ PATRON_MODO_PROFUNDO = re.compile(
     r"\b(compara|comparaci[oó]n|analiza|an[aá]lisis|sintetiza|s[ií]ntesis|"
     r"resume todo|resumen completo|en profundidad|a fondo)\b", re.IGNORECASE
 )
-PATRON_LINK = re.compile(r"^(guardar el link:|guarda el link:|guardar link:|guarda link:)", re.IGNORECASE)
+PATRON_LINK = re.compile(r"^(guardar el link|guarda el link|guardar link|guarda link)\s*:", re.IGNORECASE)
 PATRON_URL = re.compile(r"https?://\S+", re.IGNORECASE)
 FRASES_GUARDADO_SIN_COMANDO = ["mi profesión es", "guarda esto", "recuerda que", "anota que"]
 
@@ -125,9 +125,10 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
         url_detectada = match_url.group(0)
 
         if categoria_link:
-            await telegram_client.enviar_mensaje(chat_id, "🔗 Leyendo y procesando el artículo, un momento, señor...")
-            resultado = await link_ingestion.guardar_link_web(url_detectada, categoria_link, telegram_id)
-            await category_flow._enviar_resultado_link(chat_id, resultado)
+            await telegram_client.enviar_mensaje(chat_id, "🔗 Leyendo el artículo, señor — le aviso apenas termine de indexarlo.")
+            resultado = await link_ingestion.iniciar_guardado_link_web(url_detectada, categoria_link, chat_id)
+            if not resultado["exito"]:
+                await telegram_client.enviar_mensaje(chat_id, "❌ " + resultado.get("mensaje", "No se pudo procesar el link."))
         else:
             await category_flow.pedir_categoria_interactiva(chat_id, "link", {"url": url_detectada})
         return {"ok": True}

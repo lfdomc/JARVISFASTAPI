@@ -1,13 +1,13 @@
 import io
 import hashlib
 import logging
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
 import httpx
 from pypdf import PdfReader
 
 from app.config import settings
 from app.chunking import crear_chunks_markdown
-from app import gemini_client
+from app import gemini_client, logging_utils
 
 logger = logging.getLogger("documents")
 router = APIRouter(prefix="/api/documents", tags=["documents"])
@@ -60,10 +60,10 @@ async def listar_categorias_existentes():
 
 @router.get("")
 async def listar_documentos():
-    """Lista todos los documentos activos con su conteo de fragmentos."""
+    """Lista documentos activos y en proceso, con su conteo de fragmentos."""
     url = (
         f"{_base()}/rest/v1/documentos_gdp"
-        f"?estado=eq.ACTIVE&select=id,nombre_archivo,categoria,mime_type,creado_en"
+        f"?estado=in.(ACTIVE,PROCESSING,FAILED)&select=id,nombre_archivo,categoria,mime_type,creado_en,estado"
         f"&order=creado_en.desc"
     )
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -153,7 +153,7 @@ async def restaurar_documento(documento_id: str):
     return {"ok": True, "restaurado": documento_id}
 
 
-async def _crear_documento_maestro(nombre_archivo: str, contenido_markdown: str, categoria: str, mime_type: str) -> str | None:
+async def _crear_documento_maestro(nombre_archivo: str, contenido_markdown: str, categoria: str, mime_type: str, estado: str = "ACTIVE") -> str | None:
     import hashlib
     import uuid
     hash_sha256 = hashlib.sha256(contenido_markdown.encode("utf-8")).hexdigest()
@@ -170,7 +170,7 @@ async def _crear_documento_maestro(nombre_archivo: str, contenido_markdown: str,
         "nombre_archivo": nombre_archivo,
         "mime_type": mime_type,
         "contenido_markdown": contenido_markdown,
-        "estado": "ACTIVE",
+        "estado": estado,
         "hash_sha256": hash_sha256,
         "creado_por": "dashboard",
         "version_major": 1,
@@ -216,12 +216,16 @@ def _extraer_texto_pdf(contenido_bytes: bytes) -> str:
 
 @router.post("/upload")
 async def subir_documento(
+    background_tasks: BackgroundTasks,
     archivo: UploadFile = File(...),
     categoria: str = Form(...),
 ):
     """
-    Acepta .pdf, .md o .txt. Extrae el texto, lo trocea, genera embeddings
-    y lo guarda como un documento nuevo.
+    Acepta .pdf, .md o .txt. Extrae el texto rápido (síncrono, es solo
+    parseo local) y valida duplicados de inmediato — pero el chunking +
+    generación de embeddings (lo que de verdad tarda) corre en SEGUNDO
+    PLANO, para no dejar al usuario esperando con la pantalla congelada
+    en archivos grandes.
 
     Protecciones aplicadas (mismas que en la ingesta de Firecrawl):
     1. Duplicados: rechaza si ya existe un documento con el mismo
@@ -250,11 +254,13 @@ async def subir_documento(
     if not texto.strip():
         raise HTTPException(status_code=400, detail="El archivo no contiene texto extraíble")
 
-    # PROTECCIÓN 1: duplicados por contenido exacto (hash SHA-256)
+    # PROTECCIÓN 1: duplicados por contenido exacto (hash SHA-256) — se
+    # revisa YA, antes de encolar nada, para fallar rápido sin desperdiciar
+    # trabajo en segundo plano.
     hash_contenido = hashlib.sha256(texto.encode("utf-8")).hexdigest()
     async with httpx.AsyncClient(timeout=15.0) as client:
         dup_resp = await client.get(
-            f"{_base()}/rest/v1/documentos_gdp?hash_sha256=eq.{hash_contenido}&estado=eq.ACTIVE&select=id,nombre_archivo",
+            f"{_base()}/rest/v1/documentos_gdp?hash_sha256=eq.{hash_contenido}&estado=in.(ACTIVE,PROCESSING)&select=id,nombre_archivo",
             headers=_headers()
         )
         if dup_resp.status_code == 200:
@@ -262,73 +268,98 @@ async def subir_documento(
             if existentes:
                 raise HTTPException(
                     status_code=409,
-                    detail=f"Este contenido ya está indexado como \"{existentes[0]['nombre_archivo']}\"."
+                    detail=f"Este contenido ya está indexado (o en proceso) como \"{existentes[0]['nombre_archivo']}\"."
                 )
 
-    documento_id = await _crear_documento_maestro(nombre, texto, categoria_final, mime_type)
+    # Se crea de inmediato en estado PROCESSING — visible en el dashboard
+    # como "procesando", pero invisible para las búsquedas (busqueda_hibrida_rrf
+    # solo considera documentos ACTIVE) hasta que termine.
+    documento_id = await _crear_documento_maestro(nombre, texto, categoria_final, mime_type, estado="PROCESSING")
     if not documento_id:
         raise HTTPException(status_code=502, detail="No se pudo crear el documento maestro en Supabase")
 
-    chunks = crear_chunks_markdown(texto)
-
-    # PROTECCIÓN 3: coherencia categoría-contenido (solo avisa, no bloquea)
-    advertencia_coherencia = None
-    try:
-        muestra = (nombre + "\n" + texto)[:1500]
-        embedding_muestra = await gemini_client.generar_embedding(muestra)
-        if embedding_muestra:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                coh_resp = await client.post(
-                    f"{_base()}/rest/v1/rpc/verificar_coherencia_categoria",
-                    json={"query_embedding": embedding_muestra, "p_categoria": categoria_final},
-                    headers=_headers()
-                )
-                if coh_resp.status_code == 200:
-                    datos = coh_resp.json()
-                    if datos and datos[0].get("fragmentos_comparados", 0) > 0:
-                        similitud = datos[0].get("similitud_promedio", 1.0)
-                        if similitud < UMBRAL_COHERENCIA_CATEGORIA:
-                            advertencia_coherencia = (
-                                f"Este documento no se parece mucho a lo que ya tienes en "
-                                f"'{categoria_final}' ({round(similitud * 100)}% de coherencia)."
-                            )
-    except Exception as e:
-        logger.warning(f"No se pudo verificar coherencia (no bloquea): {e}")
-
-    # PROTECCIÓN 2: filtro de relevancia por fragmento
-    vector_referencia = await gemini_client.generar_embedding(f"{categoria_final}: {nombre}")
-
-    guardados = 0
-    descartados = 0
-    for i, chunk in enumerate(chunks):
-        embedding = await gemini_client.generar_embedding(chunk)
-        if not embedding:
-            continue
-
-        if vector_referencia:
-            relevancia = _similitud_coseno(vector_referencia, embedding)
-            if relevancia < UMBRAL_RELEVANCIA_FRAGMENTO:
-                descartados += 1
-                logger.info(f"[FILTRO {round(relevancia*100)}%] Fragmento {i+1}/{len(chunks)} descartado.")
-                continue
-
-        metadata = {"origen": nombre, "chunk_index": i + 1, "total_chunks": len(chunks)}
-        exito = await _guardar_fragmento(chunk, categoria_final, embedding, documento_id, metadata)
-        if exito:
-            guardados += 1
-
-    if guardados == 0 and len(chunks) > 0:
-        raise HTTPException(
-            status_code=422,
-            detail="El documento se guardó, pero ningún fragmento pasó el filtro de relevancia. Revisa la categoría elegida."
-        )
+    background_tasks.add_task(_procesar_documento_en_segundo_plano, documento_id, nombre, texto, categoria_final)
 
     return {
         "ok": True,
         "documento_id": documento_id,
         "nombre_archivo": nombre,
-        "fragmentos_totales": len(chunks),
-        "fragmentos_guardados": guardados,
-        "fragmentos_descartados": descartados,
-        "advertencia_coherencia": advertencia_coherencia,
+        "estado": "processing",
+        "mensaje": "El documento se está procesando en segundo plano. Actualiza la lista en unos momentos para ver el progreso.",
     }
+
+
+async def _actualizar_estado_documento(documento_id: str, estado: str):
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        await client.patch(
+            f"{_base()}/rest/v1/documentos_gdp?id=eq.{documento_id}",
+            json={"estado": estado},
+            headers=_headers({"Prefer": "return=minimal"})
+        )
+
+
+async def _procesar_documento_en_segundo_plano(documento_id: str, nombre: str, texto: str, categoria_final: str):
+    """Corre DESPUÉS de que la petición HTTP ya respondió — el chunking,
+    los embeddings y el chequeo de coherencia pasan aquí, sin bloquear al
+    usuario."""
+    try:
+        chunks = crear_chunks_markdown(texto)
+
+        # PROTECCIÓN 3: coherencia categoría-contenido
+        try:
+            muestra = (nombre + "\n" + texto)[:1500]
+            embedding_muestra = await gemini_client.generar_embedding(muestra)
+            if embedding_muestra:
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    coh_resp = await client.post(
+                        f"{_base()}/rest/v1/rpc/verificar_coherencia_categoria",
+                        json={"query_embedding": embedding_muestra, "p_categoria": categoria_final},
+                        headers=_headers()
+                    )
+                    if coh_resp.status_code == 200:
+                        datos = coh_resp.json()
+                        if datos and datos[0].get("fragmentos_comparados", 0) > 0:
+                            similitud = datos[0].get("similitud_promedio", 1.0)
+                            if similitud < UMBRAL_COHERENCIA_CATEGORIA:
+                                await logging_utils.registrar_error(
+                                    "SUBIDA_COHERENCIA", f"Baja coherencia con '{categoria_final}' ({round(similitud*100)}%)",
+                                    nombre, "Revisar la categoría elegida — no bloquea, solo avisa"
+                                )
+        except Exception as e:
+            logger.warning(f"No se pudo verificar coherencia (no bloquea): {e}")
+
+        # PROTECCIÓN 2: filtro de relevancia por fragmento
+        vector_referencia = await gemini_client.generar_embedding(f"{categoria_final}: {nombre}")
+
+        guardados = 0
+        descartados = 0
+        for i, chunk in enumerate(chunks):
+            embedding = await gemini_client.generar_embedding(chunk)
+            if not embedding:
+                continue
+
+            if vector_referencia:
+                relevancia = _similitud_coseno(vector_referencia, embedding)
+                if relevancia < UMBRAL_RELEVANCIA_FRAGMENTO:
+                    descartados += 1
+                    continue
+
+            metadata = {"origen": nombre, "chunk_index": i + 1, "total_chunks": len(chunks)}
+            exito = await _guardar_fragmento(chunk, categoria_final, embedding, documento_id, metadata)
+            if exito:
+                guardados += 1
+
+        if guardados == 0 and len(chunks) > 0:
+            await _actualizar_estado_documento(documento_id, "FAILED")
+            await logging_utils.registrar_error(
+                "SUBIDA_DOCUMENTO", "Ningún fragmento pasó el filtro de relevancia", nombre,
+                "Revisar la categoría elegida o el umbral de relevancia"
+            )
+            return
+
+        await _actualizar_estado_documento(documento_id, "ACTIVE")
+        logger.info(f"[{nombre}] procesado en segundo plano: {guardados}/{len(chunks)} fragmentos ({descartados} descartados).")
+
+    except Exception as e:
+        await _actualizar_estado_documento(documento_id, "FAILED")
+        await logging_utils.registrar_error("SUBIDA_DOCUMENTO", f"Excepción procesando en segundo plano: {e}", nombre)

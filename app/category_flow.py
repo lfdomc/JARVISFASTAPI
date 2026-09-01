@@ -64,24 +64,13 @@ async def finalizar_guardado_con_categoria(token: str, categoria_elegida: str, c
 
     if datos["tipo"] == "link":
         from app import link_ingestion
-        await telegram_client.enviar_mensaje(chat_id, "🔗 Leyendo y procesando el artículo, un momento, señor...")
-        resultado = await link_ingestion.guardar_link_web(datos["url"], categoria_final, telegram_id)
-        await _enviar_resultado_link(chat_id, resultado)
+        await telegram_client.enviar_mensaje(chat_id, "🔗 Leyendo el artículo, señor — le aviso apenas termine de indexarlo.")
+        resultado = await link_ingestion.iniciar_guardado_link_web(datos["url"], categoria_final, chat_id)
+        if not resultado["exito"]:
+            await telegram_client.enviar_mensaje(chat_id, "❌ " + resultado.get("mensaje", "No se pudo procesar el link."))
 
     elif datos["tipo"] == "nota":
         await _procesar_confirmacion_nota(chat_id, datos["texto"], categoria_final, telegram_id, datos.get("nombre_completo", ""))
-
-
-async def _enviar_resultado_link(chat_id: int, resultado: dict):
-    if resultado["exito"]:
-        linea_descartados = f"\n🚫 Descartados por baja relevancia: {resultado['descartados']}" if resultado.get("descartados") else ""
-        advertencia = resultado.get("advertencia") or ""
-        await telegram_client.enviar_mensaje(
-            chat_id,
-            f"✅ Indexado de inmediato: *{resultado['titulo']}*\n📌 Categoría: `{resultado['categoria']}`\n🧩 Fragmentos guardados: {resultado['fragmentos']}{linea_descartados}{advertencia}"
-        )
-    else:
-        await telegram_client.enviar_mensaje(chat_id, "❌ " + resultado.get("mensaje", "No se pudo procesar el link."))
 
 
 async def _procesar_confirmacion_nota(chat_id: int, texto: str, categoria: str, telegram_id: str, nombre_completo: str):

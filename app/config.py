@@ -18,6 +18,10 @@ class Settings:
     # Firecrawl (para la ingesta de links web, se conecta después)
     FIRECRAWL_API_KEY: str = os.environ.get("FIRECRAWL_API_KEY", "")
 
+    # Clave compartida para proteger el dashboard — sin esto, cualquiera
+    # con la URL de Vercel podría ver/subir/borrar tus documentos.
+    DASHBOARD_API_KEY: str = os.environ.get("DASHBOARD_API_KEY", "")
+
     # Pool de claves de Gemini — mismo patrón que en Apps Script: cualquier
     # variable de entorno que empiece con GEMINI_KEY_ se suma al pool,
     # rotando automáticamente si una se queda sin cuota (429).

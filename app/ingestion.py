@@ -46,7 +46,7 @@ async def buscar_documento_duplicado(hash_contenido: str) -> dict | None:
     return None
 
 
-async def crear_documento_maestro(nombre_archivo: str, contenido_markdown: str, categoria: str, mime_type: str, creado_por: str = "sistema") -> str | None:
+async def crear_documento_maestro(nombre_archivo: str, contenido_markdown: str, categoria: str, mime_type: str, creado_por: str = "sistema", estado: str = "ACTIVE") -> str | None:
     documento_uuid = str(uuid.uuid4())
     hash_contenido = hashlib.sha256(contenido_markdown.encode("utf-8")).hexdigest()
     payload = {
@@ -59,7 +59,7 @@ async def crear_documento_maestro(nombre_archivo: str, contenido_markdown: str, 
         "nombre_archivo": nombre_archivo,
         "mime_type": mime_type,
         "contenido_markdown": contenido_markdown,
-        "estado": "ACTIVE",
+        "estado": estado,
         "hash_sha256": hash_contenido,
         "creado_por": creado_por,
         "version_major": 1,
@@ -135,3 +135,54 @@ async def sugerir_categoria_similar(embedding: list[float]) -> str | None:
             if datos and datos[0].get("categoria_sugerida"):
                 return datos[0]["categoria_sugerida"]
     return None
+
+
+# ============================================================================
+# COLA DE PROCESAMIENTO EN SEGUNDO PLANO
+# El estado del propio documento (documentos_gdp.estado: PROCESSING -> ACTIVE
+# o FAILED) hace las veces de "cola" — más simple que una tabla de jobs
+# separada, y busqueda_hibrida_rrf ya excluye todo lo que no esté ACTIVE.
+# ============================================================================
+
+async def actualizar_estado_documento(documento_id: str, estado: str):
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        await client.patch(
+            f"{_base()}/rest/v1/documentos_gdp?id=eq.{documento_id}",
+            json={"estado": estado},
+            headers=_headers({"Prefer": "return=minimal"})
+        )
+
+
+async def procesar_fragmentos_en_segundo_plano(documento_id: str, texto: str, categoria: str, nombre: str) -> tuple[int, int]:
+    """Corre DESPUÉS de responder al usuario — chunking, embeddings y
+    filtro de relevancia, sin bloquear la respuesta inicial.
+    Devuelve (guardados, descartados)."""
+    from app import gemini_client
+    from app.chunking import crear_chunks_markdown
+    try:
+        chunks = crear_chunks_markdown(texto)
+        vector_referencia = await gemini_client.generar_embedding(f"{categoria}: {nombre}")
+
+        guardados = 0
+        descartados = 0
+        for i, chunk in enumerate(chunks):
+            embedding = await gemini_client.generar_embedding(chunk)
+            if not embedding:
+                continue
+            if vector_referencia and similitud_coseno(vector_referencia, embedding) < UMBRAL_RELEVANCIA_FRAGMENTO:
+                descartados += 1
+                continue
+            metadata = {"origen": nombre, "chunk_index": i + 1, "total_chunks": len(chunks)}
+            if await guardar_fragmento(chunk, categoria, embedding, documento_id, metadata):
+                guardados += 1
+
+        if guardados == 0 and len(chunks) > 0:
+            await actualizar_estado_documento(documento_id, "FAILED")
+            await logging_utils.registrar_error("PROCESAR_FRAGMENTOS_BG", "Ningún fragmento pasó el filtro de relevancia", documento_id)
+        else:
+            await actualizar_estado_documento(documento_id, "ACTIVE")
+        return guardados, descartados
+    except Exception as e:
+        await actualizar_estado_documento(documento_id, "FAILED")
+        await logging_utils.registrar_error("PROCESAR_FRAGMENTOS_BG", str(e), documento_id)
+        return 0, 0
