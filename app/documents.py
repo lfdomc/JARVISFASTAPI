@@ -6,7 +6,8 @@ import httpx
 from pypdf import PdfReader
 
 from app.config import settings
-from app.chunking import crear_chunks_markdown
+from app.chunking import crear_chunks_markdown, crear_chunks_con_paginas
+from app.indice_extractor import extraer_indice_documento, encontrar_seccion_para_pagina
 from app import gemini_client, logging_utils
 
 logger = logging.getLogger("documents")
@@ -153,7 +154,7 @@ async def restaurar_documento(documento_id: str):
     return {"ok": True, "restaurado": documento_id}
 
 
-async def _crear_documento_maestro(nombre_archivo: str, contenido_markdown: str, categoria: str, mime_type: str, estado: str = "ACTIVE") -> str | None:
+async def _crear_documento_maestro(nombre_archivo: str, contenido_markdown: str, categoria: str, mime_type: str, estado: str = "ACTIVE", indice_markdown: str | None = None) -> str | None:
     import hashlib
     import uuid
     hash_sha256 = hashlib.sha256(contenido_markdown.encode("utf-8")).hexdigest()
@@ -175,6 +176,7 @@ async def _crear_documento_maestro(nombre_archivo: str, contenido_markdown: str,
         "creado_por": "dashboard",
         "version_major": 1,
         "version_minor": 0,
+        "indice_markdown": indice_markdown,
     }
     async with httpx.AsyncClient(timeout=30.0) as client:
         resp = await client.post(url, json=payload, headers=_headers({"Prefer": "return=representation"}))
@@ -191,7 +193,7 @@ async def _crear_documento_maestro(nombre_archivo: str, contenido_markdown: str,
     return None
 
 
-async def _guardar_fragmento(texto: str, categoria: str, embedding: list, documento_id: str, metadata: dict) -> bool:
+async def _guardar_fragmento(texto: str, categoria: str, embedding: list, documento_id: str, metadata: dict, pagina_inicio: int | None = None, pagina_fin: int | None = None, seccion: str | None = None) -> bool:
     url = f"{_base()}/rest/v1/fragmentos_vectoriales_gdp"
     payload = [{
         "documento_id": documento_id,
@@ -199,19 +201,22 @@ async def _guardar_fragmento(texto: str, categoria: str, embedding: list, docume
         "contenido_chunk": texto,
         "embedding": embedding,
         "metadata": metadata,
+        "pagina_inicio": pagina_inicio,
+        "pagina_fin": pagina_fin,
+        "seccion": seccion,
     }]
     async with httpx.AsyncClient(timeout=20.0) as client:
         resp = await client.post(url, json=payload, headers=_headers({"Prefer": "return=minimal"}))
         return resp.status_code in (201, 204)
 
 
-def _extraer_texto_pdf(contenido_bytes: bytes) -> str:
+def _extraer_texto_pdf(contenido_bytes: bytes) -> list[str]:
+    """Devuelve una lista con el texto de cada página por separado —
+    preserva el límite real de página para poder citarla con certeza
+    después, en vez de que el modelo tenga que adivinarla del pie de
+    página embebido en el texto."""
     lector = PdfReader(io.BytesIO(contenido_bytes))
-    partes = []
-    for pagina in lector.pages:
-        texto_pagina = pagina.extract_text() or ""
-        partes.append(texto_pagina)
-    return "\n\n".join(partes)
+    return [pagina.extract_text() or "" for pagina in lector.pages]
 
 
 @router.post("/upload")
@@ -241,16 +246,17 @@ async def subir_documento(
 
     if nombre.lower().endswith(".pdf"):
         try:
-            texto = _extraer_texto_pdf(contenido_bytes)
+            paginas = _extraer_texto_pdf(contenido_bytes)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"No se pudo leer el PDF: {e}")
         mime_type = "application/pdf"
     elif nombre.lower().endswith((".md", ".txt")):
-        texto = contenido_bytes.decode("utf-8", errors="replace")
+        paginas = [contenido_bytes.decode("utf-8", errors="replace")]
         mime_type = "text/markdown"
     else:
         raise HTTPException(status_code=400, detail="Solo se aceptan archivos .pdf, .md o .txt")
 
+    texto = "\n\n".join(paginas)
     if not texto.strip():
         raise HTTPException(status_code=400, detail="El archivo no contiene texto extraíble")
 
@@ -271,20 +277,29 @@ async def subir_documento(
                     detail=f"Este contenido ya está indexado (o en proceso) como \"{existentes[0]['nombre_archivo']}\"."
                 )
 
+    # Detecta el índice/tabla de contenidos del documento (si tiene uno) —
+    # solo tiene sentido para PDFs, que sí traen páginas reales separadas.
+    resultado_indice = extraer_indice_documento(paginas) if nombre.lower().endswith(".pdf") else None
+    indice_markdown = resultado_indice["markdown"] if resultado_indice else None
+
     # Se crea de inmediato en estado PROCESSING — visible en el dashboard
     # como "procesando", pero invisible para las búsquedas (busqueda_hibrida_rrf
     # solo considera documentos ACTIVE) hasta que termine.
-    documento_id = await _crear_documento_maestro(nombre, texto, categoria_final, mime_type, estado="PROCESSING")
+    documento_id = await _crear_documento_maestro(nombre, texto, categoria_final, mime_type, estado="PROCESSING", indice_markdown=indice_markdown)
     if not documento_id:
         raise HTTPException(status_code=502, detail="No se pudo crear el documento maestro en Supabase")
 
-    background_tasks.add_task(_procesar_documento_en_segundo_plano, documento_id, nombre, texto, categoria_final)
+    background_tasks.add_task(
+        _procesar_documento_en_segundo_plano, documento_id, nombre, paginas, categoria_final,
+        resultado_indice["entradas"] if resultado_indice else None,
+    )
 
     return {
         "ok": True,
         "documento_id": documento_id,
         "nombre_archivo": nombre,
         "estado": "processing",
+        "indice_detectado": bool(resultado_indice),
         "mensaje": "El documento se está procesando en segundo plano. Actualiza la lista en unos momentos para ver el progreso.",
     }
 
@@ -298,16 +313,19 @@ async def _actualizar_estado_documento(documento_id: str, estado: str):
         )
 
 
-async def _procesar_documento_en_segundo_plano(documento_id: str, nombre: str, texto: str, categoria_final: str):
+async def _procesar_documento_en_segundo_plano(documento_id: str, nombre: str, paginas: list[str], categoria_final: str, entradas_indice: list[dict] | None = None):
     """Corre DESPUÉS de que la petición HTTP ya respondió — el chunking,
     los embeddings y el chequeo de coherencia pasan aquí, sin bloquear al
-    usuario."""
+    usuario. Cada fragmento guarda su página real de origen (capturada en
+    la extracción, no adivinada después) y, si el documento tiene índice,
+    también su sección — dirección completa dentro del documento."""
     try:
-        chunks = crear_chunks_markdown(texto)
+        chunks = crear_chunks_con_paginas(paginas)
+        texto_completo = "\n\n".join(paginas)
 
         # PROTECCIÓN 3: coherencia categoría-contenido
         try:
-            muestra = (nombre + "\n" + texto)[:1500]
+            muestra = (nombre + "\n" + texto_completo)[:1500]
             embedding_muestra = await gemini_client.generar_embedding(muestra)
             if embedding_muestra:
                 async with httpx.AsyncClient(timeout=15.0) as client:
@@ -334,7 +352,7 @@ async def _procesar_documento_en_segundo_plano(documento_id: str, nombre: str, t
         guardados = 0
         descartados = 0
         for i, chunk in enumerate(chunks):
-            embedding = await gemini_client.generar_embedding(chunk)
+            embedding = await gemini_client.generar_embedding(chunk["texto"])
             if not embedding:
                 continue
 
@@ -344,8 +362,18 @@ async def _procesar_documento_en_segundo_plano(documento_id: str, nombre: str, t
                     descartados += 1
                     continue
 
-            metadata = {"origen": nombre, "chunk_index": i + 1, "total_chunks": len(chunks)}
-            exito = await _guardar_fragmento(chunk, categoria_final, embedding, documento_id, metadata)
+            metadata = {
+                "origen": nombre,
+                "chunk_index": i + 1,
+                "total_chunks": len(chunks),
+                "pagina_inicio": chunk["pagina_inicio"],
+                "pagina_fin": chunk["pagina_fin"],
+            }
+            seccion = encontrar_seccion_para_pagina(entradas_indice, chunk["pagina_inicio"]) if entradas_indice else None
+            exito = await _guardar_fragmento(
+                chunk["texto"], categoria_final, embedding, documento_id, metadata,
+                pagina_inicio=chunk["pagina_inicio"], pagina_fin=chunk["pagina_fin"], seccion=seccion,
+            )
             if exito:
                 guardados += 1
 

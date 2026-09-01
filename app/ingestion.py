@@ -186,3 +186,76 @@ async def procesar_fragmentos_en_segundo_plano(documento_id: str, texto: str, ca
         await actualizar_estado_documento(documento_id, "FAILED")
         await logging_utils.registrar_error("PROCESAR_FRAGMENTOS_BG", str(e), documento_id)
         return 0, 0
+
+
+async def obtener_indices_documentos(documento_ids: list[str]) -> dict[str, str]:
+    """Devuelve {documento_id: indice_markdown} para los documentos que
+    sí tienen un índice detectado — usado en modo profundo para darle al
+    modelo el mapa completo del documento antes de analizar fragmentos
+    sueltos."""
+    ids_validos = [d for d in set(documento_ids) if d]
+    if not ids_validos:
+        return {}
+    filtro = ",".join(ids_validos)
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(
+            f"{_base()}/rest/v1/documentos_gdp?id=in.({filtro})&indice_markdown=not.is.null&select=id,indice_markdown",
+            headers=_headers()
+        )
+        if resp.status_code == 200:
+            return {fila["id"]: fila["indice_markdown"] for fila in resp.json()}
+    return {}
+
+
+MAX_VECINOS_TOTAL = 12
+RADIO_PAGINAS_VECINAS = 1  # misma página + 1 antes + 1 después
+
+
+async def expandir_contexto_con_vecinos(fragmentos: list[dict]) -> list[dict]:
+    """
+    Los fragmentos de la MISMA página, o de páginas inmediatamente antes/
+    después, están relacionados — probablemente son continuación del
+    mismo párrafo, tabla o idea que quedó partida por el troceo. Esta
+    función busca esos vecinos y los agrega al contexto, marcados como
+    "contexto de vecindad" (no como resultado directo de la búsqueda),
+    para que el modelo tenga la imagen completa de esa zona del
+    documento, no solo el fragmento aislado que ganó por similitud.
+
+    No aplica a notas personales (sin documento_id) ni si no hay
+    información de página — no hay "vecindad" que expandir ahí.
+    """
+    ids_ya_incluidos = {f["id"] for f in fragmentos}
+    vecinos_encontrados = []
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        for f in fragmentos:
+            if len(vecinos_encontrados) >= MAX_VECINOS_TOTAL:
+                break
+            documento_id = f.get("documento_id")
+            pagina = f.get("pagina_inicio") or (f.get("metadata") or {}).get("pagina_inicio")
+            if not documento_id or not pagina:
+                continue
+
+            p_desde = max(1, int(pagina) - RADIO_PAGINAS_VECINAS)
+            p_hasta = int(pagina) + RADIO_PAGINAS_VECINAS
+
+            resp = await client.get(
+                f"{_base()}/rest/v1/fragmentos_vectoriales_gdp"
+                f"?documento_id=eq.{documento_id}"
+                f"&pagina_inicio=gte.{p_desde}&pagina_inicio=lte.{p_hasta}"
+                f"&select=id,contenido_chunk,categoria,metadata,pagina_inicio,pagina_fin,seccion,documento_id"
+                f"&order=pagina_inicio.asc",
+                headers=_headers()
+            )
+            if resp.status_code != 200:
+                continue
+
+            for vecino in resp.json():
+                if vecino["id"] in ids_ya_incluidos or len(vecinos_encontrados) >= MAX_VECINOS_TOTAL:
+                    continue
+                ids_ya_incluidos.add(vecino["id"])
+                vecino["nombre_documento"] = f.get("nombre_documento")
+                vecino["es_contexto_vecino"] = True
+                vecinos_encontrados.append(vecino)
+
+    return fragmentos + vecinos_encontrados

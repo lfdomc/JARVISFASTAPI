@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app import gemini_client, supabase_client, telegram_client, state, logging_utils
-from app import category_flow, link_ingestion, voice
+from app import category_flow, link_ingestion, voice, verificacion, ingestion
 from app import clients, documents, stats, auth
 
 logging.basicConfig(level=logging.INFO)
@@ -192,9 +192,44 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
                 texto_usuario, embedding_pregunta, match_count=match_count, telegram_id_solicitante=telegram_id,
             )
 
+        # Modo profundo: además de los fragmentos que ganaron por
+        # relevancia semántica, se agregan sus vecinos de página — misma
+        # página o adyacente — para dar contexto completo de esa zona
+        # del documento en vez de fragmentos aislados.
+        if modo_profundo and contexto_fragmentos:
+            contexto_fragmentos = await ingestion.expandir_contexto_con_vecinos(contexto_fragmentos)
+
+        def _etiqueta_fuente(f: dict) -> str:
+            nombre_doc = f.get('nombre_documento', 'N/A')
+            # Prioriza las columnas dedicadas (pagina_inicio/pagina_fin/seccion);
+            # si un fragmento viejo no las tiene, cae de vuelta a metadata.
+            metadata = f.get('metadata') or {}
+            p_ini = f.get('pagina_inicio') or metadata.get('pagina_inicio')
+            p_fin = f.get('pagina_fin') or metadata.get('pagina_fin')
+            seccion = f.get('seccion')
+            etiqueta_seccion = f" | Sección: {seccion}" if seccion else ""
+            etiqueta_vecino = " | (contexto de página vecina, no resultado directo de búsqueda)" if f.get('es_contexto_vecino') else ""
+            if p_ini and p_fin:
+                pagina_str = f"pág. {p_ini}" if p_ini == p_fin else f"págs. {p_ini}-{p_fin}"
+                return f"[Fuente: {nombre_doc} | Página verificada: {pagina_str}{etiqueta_seccion}{etiqueta_vecino}]"
+            return f"[Fuente: {nombre_doc} | Página: no disponible — no cites un número de página para este fragmento]"
+
         contexto_texto = "\n\n".join(
-            f"[Fuente: {f.get('nombre_documento', 'N/A')}]\n{f['contenido_chunk']}" for f in contexto_fragmentos
+            f"{_etiqueta_fuente(f)}\n{f['contenido_chunk']}" for f in contexto_fragmentos
         ) or "Sin registros previos relevantes."
+
+        # En modo profundo, si los documentos involucrados tienen un
+        # índice detectado en la ingesta, se lo damos al modelo como mapa
+        # general ANTES de los fragmentos sueltos — ayuda a entender en
+        # qué sección del documento está cada fragmento, y da contexto
+        # de la estructura completa para preguntas de análisis global.
+        indices_texto = ""
+        if modo_profundo:
+            documento_ids = [f.get("documento_id") for f in contexto_fragmentos if f.get("documento_id")]
+            indices = await ingestion.obtener_indices_documentos(documento_ids)
+            if indices:
+                bloques = "\n\n".join(indices.values())
+                indices_texto = f"[ÍNDICE / ESTRUCTURA DE LOS DOCUMENTOS INVOLUCRADOS]\n{bloques}\n\n"
 
         instruccion_url = (
             "\n- El mensaje del usuario contiene una URL: usa tu herramienta de lectura de contenido web "
@@ -206,9 +241,14 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
             system_prompt = (
                 "Eres JARVIS, el asistente de inteligencia artificial del usuario, operando en MODO DE "
                 "ANÁLISIS PROFUNDO.\n\n"
-                f"[FRAGMENTOS RECUPERADOS DE LA BASE DE CONOCIMIENTO]\n{contexto_texto}\n\n"
+                f"{indices_texto}[FRAGMENTOS RECUPERADOS DE LA BASE DE CONOCIMIENTO]\n{contexto_texto}\n\n"
                 "[INSTRUCCIONES DE ANÁLISIS]\n"
                 "- Analiza TODOS los fragmentos provistos antes de responder.\n"
+                "- Algunos fragmentos están marcados como \"contexto de página vecina\" — no fueron "
+                "elegidos por relevancia semántica directa, sino agregados porque están en la misma "
+                "página o una página adyacente a un fragmento relevante. Úsalos para entender mejor el "
+                "contexto y la continuidad del documento en esa zona, pero prioriza los fragmentos que sí "
+                "fueron resultado directo de la búsqueda al construir tu respuesta.\n"
                 "- Cuando cites un dato, indica de qué documento proviene.\n"
                 "- REGLA DE TRAZABILIDAD (crítica): cada cita de página o fuente debe corresponder "
                 "EXACTAMENTE al fragmento del que la extrajiste. Nunca combines datos de dos fragmentos "
@@ -217,13 +257,17 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
                 "con su propia página cada uno. Si no tienes un fragmento que respalde una página "
                 "específica para un dato, no le pongas número de página — di que no se pudo verificar la "
                 "página exacta.\n"
-                "- VERIFICACIÓN DE PÁGINA EN DOBLE PASADA (crítica): antes de escribir cada número de "
-                "página en tu respuesta, revísalo dos veces contra el fragmento correspondiente — primero "
-                "identifica qué fragmento respalda el dato, y luego confirma que el número de página que "
-                "vas a escribir es el que aparece en ESE fragmento específico, no en uno cercano o similar. "
-                "Es de suma importancia para que el usuario pueda encontrar el dato en el documento "
-                "original — una página incorrecta hace perder la confianza en toda la respuesta, aunque el "
-                "dato en sí sea correcto.\n"
+                "- VERIFICACIÓN DE PÁGINA EN DOBLE PASADA (crítica): cada fragmento viene etiquetado con "
+                "\"Página verificada: pág. X\" — esa etiqueta es la ÚNICA fuente válida para el número de "
+                "página que cites. Nunca reconstruyas ni adivines un número de página a partir de texto "
+                "que aparezca dentro del contenido del fragmento (pies de página, encabezados repetidos, "
+                "numeración que veas en el propio texto) — usa exclusivamente la etiqueta \"Página "
+                "verificada\". Si un fragmento dice \"Página: no disponible\", NO le pongas ningún número "
+                "de página a los datos de ese fragmento — di que la página no se pudo verificar. Antes de "
+                "escribir cada cita, revisa dos veces que el número que vas a escribir es el que aparece "
+                "en la etiqueta del fragmento exacto que respalda ese dato. Es de suma importancia para "
+                "que el usuario pueda encontrar el dato en el documento original — una página incorrecta "
+                "hace perder la confianza en toda la respuesta, aunque el dato en sí sea correcto.\n"
                 "- NOMBRES TEXTUALES EN DOCUMENTOS DE POLÍTICAS PÚBLICAS, NORMAS O CONTRATOS: cuando el "
                 "documento define el nombre de un indicador, meta, ley, artículo o cláusula, cópialo "
                 "entre comillas tal cual aparece en el fragmento — nunca lo parafrasees ni lo combines "
@@ -279,6 +323,44 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
             logger.error(f"Fallo generando respuesta: {e}")
             await logging_utils.registrar_error("JARVIS_WEBHOOK", f"Fallo generando respuesta: {e}", texto_usuario[:200])
             respuesta = "Disculpe, señor, tuve un problema técnico generando la respuesta."
+
+        # CAPA 3 DE BLINDAJE ANTI-ALUCINACIÓN: verificación determinística
+        # (comparación de texto, no otro LLM) de que cada cita entre
+        # comillas y cada número de página realmente existen en los
+        # fragmentos recuperados. Si falla, se le da al modelo UNA
+        # oportunidad de corregirse con feedback específico; si persiste,
+        # se avisa explícitamente en vez de entregar una respuesta que
+        # parece segura sin serlo.
+        if contexto_fragmentos and respuesta:
+            resultado_verif = verificacion.verificar_respuesta(respuesta, contexto_fragmentos)
+            if not resultado_verif["ok"]:
+                logger.warning(f"Verificación falló: {resultado_verif}")
+                instruccion_correctiva = verificacion.construir_instruccion_correctiva(resultado_verif)
+                contents_correccion = contents + [
+                    {"role": "model", "parts": [{"text": respuesta}]},
+                    {"role": "user", "parts": [{"text": instruccion_correctiva}]},
+                ]
+                try:
+                    respuesta_corregida = await gemini_client.generar_respuesta(contents_correccion, usar_url_context=False)
+                    resultado_verif_2 = verificacion.verificar_respuesta(respuesta_corregida, contexto_fragmentos)
+                    respuesta = respuesta_corregida
+                    if not resultado_verif_2["ok"]:
+                        respuesta += (
+                            "\n\n⚠️ _Nota: parte de esta respuesta no pudo verificarse automáticamente "
+                            "contra los documentos fuente. Revísela con cautela antes de usarla como "
+                            "referencia definitiva._"
+                        )
+                        await logging_utils.registrar_error(
+                            "VERIFICACION_RESPUESTA",
+                            f"Persisten problemas tras corrección: {resultado_verif_2}",
+                            texto_usuario[:200]
+                        )
+                except Exception as e:
+                    logger.warning(f"Falló la corrección automática: {e}")
+                    respuesta += (
+                        "\n\n⚠️ _Nota: parte de esta respuesta no pudo verificarse automáticamente. "
+                        "Revísela con cautela._"
+                    )
 
         if aplica_cache and clave_cache and respuesta:
             state.cache_faq_set(clave_cache, respuesta)
