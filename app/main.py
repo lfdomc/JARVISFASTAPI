@@ -175,6 +175,8 @@ PATRON_MODO_PROFUNDO = re.compile(
 )
 PATRON_LINK = re.compile(r"^(guardar el link|guarda el link|guardar link|guarda link)\s*:", re.IGNORECASE)
 PATRON_URL = re.compile(r"https?://\S+", re.IGNORECASE)
+PATRON_MENCION_SECCION = re.compile(r"\b(?:secci[oó]n|cap[ií]tulo|eje(?:\s+estrat[ée]gico)?|anexo)\s+(\d+(?:\.\d+){0,3})\b", re.IGNORECASE)
+PATRON_MENCION_PAGINA = re.compile(r"\bp[aá]g(?:s|ina[s]?)?\.?\s+(\d+)\b", re.IGNORECASE)
 FRASES_GUARDADO_SIN_COMANDO = ["mi profesión es", "guarda esto", "recuerda que", "anota que"]
 
 
@@ -182,7 +184,7 @@ def _normalizar_para_cache(texto: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[¿?¡!.,;:\"'()\[\]{}]", "", texto.lower())).strip()
 
 
-VERSION_BACKEND = "2026-09-01-indice-excluido-de-busqueda"  # cámbialo cada vez que quieras confirmar un despliegue específico
+VERSION_BACKEND = "2026-09-01-fragmentos-ordenados-por-pagina"  # cámbialo cada vez que quieras confirmar un despliegue específico
 
 
 @app.get("/")
@@ -334,7 +336,39 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
             contexto_fragmentos = await supabase_client.buscar_contexto_semantico(
                 texto_usuario, embedding_pregunta, match_count=match_count, telegram_id_solicitante=telegram_id,
             )
-            contexto_fragmentos = _filtrar_por_alta_confianza(contexto_fragmentos)
+
+        # Si la pregunta menciona un número de sección/capítulo/eje/anexo
+        # explícito (ej. "sección 3.5"), se complementa con una búsqueda
+        # DIRECTA por esa columna — más confiable que depender solo de
+        # similitud semántica, porque el título de una sección a veces
+        # queda al final del fragmento ANTERIOR al contenido real, y la
+        # búsqueda semántica puede no encontrarlo entre pocos candidatos.
+        mencion_seccion = PATRON_MENCION_SECCION.search(texto_usuario)
+        if mencion_seccion:
+            fragmentos_por_seccion = await supabase_client.buscar_por_numero_seccion(
+                mencion_seccion.group(1), telegram_id_solicitante=telegram_id,
+            )
+            if fragmentos_por_seccion:
+                ids_ya_presentes = {f["id"] for f in contexto_fragmentos}
+                nuevos = [f for f in fragmentos_por_seccion if f["id"] not in ids_ya_presentes]
+                contexto_fragmentos = nuevos + contexto_fragmentos
+                logger.info(f"[BÚSQUEDA POR SECCIÓN] '{mencion_seccion.group(1)}' agregó {len(nuevos)} fragmento(s) directos.")
+
+        # Igual, pero para menciones directas de número de página
+        # (ej. "¿qué dice la página 50?") — mismo principio, columna
+        # pagina_inicio/pagina_fin ya confiable desde la ingesta.
+        mencion_pagina = PATRON_MENCION_PAGINA.search(texto_usuario)
+        if mencion_pagina:
+            fragmentos_por_pagina = await supabase_client.buscar_por_numero_pagina(
+                int(mencion_pagina.group(1)), telegram_id_solicitante=telegram_id,
+            )
+            if fragmentos_por_pagina:
+                ids_ya_presentes = {f["id"] for f in contexto_fragmentos}
+                nuevos = [f for f in fragmentos_por_pagina if f["id"] not in ids_ya_presentes]
+                contexto_fragmentos = nuevos + contexto_fragmentos
+                logger.info(f"[BÚSQUEDA POR PÁGINA] '{mencion_pagina.group(1)}' agregó {len(nuevos)} fragmento(s) directos.")
+
+        contexto_fragmentos = _filtrar_por_alta_confianza(contexto_fragmentos)
 
         # Expansión de contexto por vecindad — DESACTIVADA por ahora: se
         # detectó que hacía que el modelo confundiera la página de un
