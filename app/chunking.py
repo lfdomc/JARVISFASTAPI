@@ -85,9 +85,18 @@ def crear_chunks_con_paginas(paginas: list[str], max_palabras: int = 350) -> lis
     página (una entrada de la lista = una página del PDF) y devuelve cada
     fragmento con su página de origen real, capturada en la ingesta — no
     adivinada después por el modelo a partir de un pie de página embebido
-    en el texto. Esta es la corrección de raíz al problema de "el modelo
-    cita la página equivocada": si la página nunca se pierde como dato
-    estructurado, no hay nada que adivinar.
+    en el texto.
+
+    DISEÑO: la página se seguía antes escaneando qué marcadores "quedaron
+    dentro" de cada fragmento ya armado — pero si un corte por tamaño cae
+    justo en el punto exacto donde el marcador de una página ya fue
+    consumido por el fragmento ANTERIOR (sin que haya llegado todavía el
+    marcador de la página siguiente), el fragmento nuevo perdía el rastro
+    de en qué página iba, aunque su contenido siguiera siendo de la misma
+    página. Ahora se seguimiento CONTINUO de la página mientras se arma
+    el documento — cada fragmento nuevo hereda la página en la que
+    íbamos en ese momento, sin importar si el marcador cae dentro de él
+    o quedó en el fragmento anterior.
 
     Devuelve: [{"texto": str, "pagina_inicio": int, "pagina_fin": int}, ...]
     Los números de página son 1-indexados, según el orden de la lista.
@@ -101,15 +110,13 @@ def crear_chunks_con_paginas(paginas: list[str], max_palabras: int = 350) -> lis
 
     max_caracteres = max_palabras * 6  # ~6 caracteres promedio por palabra en español
     secciones = re.split(r"(?=\n#{1,3}\s)", texto_con_marcadores)
-    chunks_brutos = []
+    chunks_brutos = []  # [{"texto_crudo": str, "pagina_inicio": int, "pagina_fin": int}, ...]
+
+    pagina_actual = 1  # seguimiento continuo, cruza fronteras de fragmento y de sección
 
     for seccion in secciones:
         contenido = seccion.strip()
         if not contenido:
-            continue
-
-        if len(contenido) <= max_caracteres:
-            chunks_brutos.append(contenido)
             continue
 
         lineas = contenido.split("\n")
@@ -118,45 +125,56 @@ def crear_chunks_con_paginas(paginas: list[str], max_palabras: int = 350) -> lis
         unidades = _agrupar_en_unidades(cuerpo)
 
         chunk_actual = (titulo + "\n") if titulo else ""
+        pagina_inicio_chunk = pagina_actual
+        pagina_fin_chunk = pagina_actual
 
         for unidad in unidades:
+            marcadores_unidad = [int(n) for n in PATRON_MARCADOR.findall(unidad)]
             unidad_con_salto = unidad + "\n"
             cabe_en_chunk_actual = len(chunk_actual) + len(unidad_con_salto) <= max_caracteres
 
             if not cabe_en_chunk_actual and chunk_actual.strip():
-                chunks_brutos.append(chunk_actual.strip())
+                chunks_brutos.append({
+                    "texto_crudo": chunk_actual.strip(),
+                    "pagina_inicio": pagina_inicio_chunk,
+                    "pagina_fin": pagina_fin_chunk,
+                })
                 chunk_actual = (titulo + "\n" if titulo else "") + unidad_con_salto
+                # El fragmento nuevo arranca en la página en la que íbamos
+                # justo antes de esta unidad — no en una que aparezca más
+                # adelante dentro de la unidad misma.
+                pagina_inicio_chunk = pagina_actual
+                pagina_fin_chunk = pagina_actual
             else:
                 chunk_actual += unidad_con_salto
+
+            if marcadores_unidad:
+                pagina_actual = max(marcadores_unidad)
+                pagina_fin_chunk = pagina_actual
             # Si la unidad es una tabla más grande que max_caracteres ella
             # sola, se deja intacta igual (mejor un fragmento grande con
             # la tabla completa que una tabla partida a la mitad).
 
         if chunk_actual.strip():
-            chunks_brutos.append(chunk_actual.strip())
+            chunks_brutos.append({
+                "texto_crudo": chunk_actual.strip(),
+                "pagina_inicio": pagina_inicio_chunk,
+                "pagina_fin": pagina_fin_chunk,
+            })
 
-    # Para cada chunk bruto: extraer qué páginas cubre (de sus marcadores)
-    # y luego quitar los marcadores del texto final (no deben llegar al
-    # embedding ni a lo que lee el modelo).
+    # Limpieza final: quitar los marcadores del texto (no deben llegar al
+    # embedding ni a lo que lee el modelo) y descartar fragmentos vacíos
+    # o demasiado cortos para ser útiles.
     resultado = []
-    pagina_previa = 1
     for chunk in chunks_brutos:
-        numeros_pagina = [int(n) for n in PATRON_MARCADOR.findall(chunk)]
-        texto_limpio = PATRON_MARCADOR.sub("", chunk).strip()
-
+        texto_limpio = PATRON_MARCADOR.sub("", chunk["texto_crudo"]).strip()
         if not texto_limpio or len(texto_limpio) < MIN_CARACTERES_CHUNK_VALIDO:
             continue
-
-        if numeros_pagina:
-            pagina_inicio = min(numeros_pagina)
-            pagina_fin = max(numeros_pagina)
-            pagina_previa = pagina_fin
-        else:
-            # Chunk sin su propio marcador (siguió fluyendo de la sección
-            # anterior tras el split) — hereda la última página vista.
-            pagina_inicio = pagina_fin = pagina_previa
-
-        resultado.append({"texto": texto_limpio, "pagina_inicio": pagina_inicio, "pagina_fin": pagina_fin})
+        resultado.append({
+            "texto": texto_limpio,
+            "pagina_inicio": chunk["pagina_inicio"],
+            "pagina_fin": chunk["pagina_fin"],
+        })
 
     if not resultado and paginas:
         texto_plano = "\n\n".join(paginas).strip()
