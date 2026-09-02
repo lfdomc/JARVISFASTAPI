@@ -12,6 +12,17 @@ más de alerta.
 import re
 
 PATRON_ENTRADA = re.compile(r'^\s*(\d+(?:\.\d+){0,3})\.?\s*(.+?)[\s\.]{1,}(\d{1,4})\s*$')
+# Documentos legales/normativos suelen poner la PALABRA antes del número
+# ("Artículo 5. Definiciones. 12", "TÍTULO I. Disposiciones. 5") — al
+# revés del formato "número primero" de planes/manuales ("5.5.4
+# Encadenamientos... 128"). Soporta número romano o decimal después de
+# la palabra, y también sirve para "Sección", "Apartado", "Cláusula",
+# "Inciso" — términos comunes en distintos tipos de documento.
+PATRON_ENTRADA_PALABRA_PRIMERO = re.compile(
+    r'^\s*(t[ií]tulo|art[ií]culo|cap[ií]tulo|secci[oó]n|apartado|cl[aá]usula|inciso|anexo)\s+'
+    r'([IVXLCDM]+|\d+(?:\.\d+)*)\.?\s*(.+?)[\s\.]{1,}(\d{1,4})\s*$',
+    re.IGNORECASE
+)
 PATRON_ANEXO = re.compile(r'^\s*(anexo\s*\d+|ap[eé]ndice\s*\d+)\s+(\d{1,4})\s*$', re.IGNORECASE)
 PATRON_ENCABEZADO_INDICE = re.compile(
     r'^\s*(contenido|[ií]ndice|tabla de contenido[s]?|table of contents)\s*$', re.IGNORECASE
@@ -78,6 +89,7 @@ def extraer_indice_documento(paginas: list[str]) -> dict | None:
                 "entradas": entradas,
                 "pagina_encontrado": num_pagina + 1,
                 "pagina_fin_indice": pagina_fin_indice,
+                "tipo_documento_probable": clasificar_tipo_documento(entradas),
             }
 
     return None
@@ -101,6 +113,23 @@ def _parsear_entradas(texto_pagina: str) -> list[dict]:
                 })
             continue
 
+        m_palabra = PATRON_ENTRADA_PALABRA_PRIMERO.match(linea)
+        if m_palabra:
+            prefijo, numero, titulo, pagina = m_palabra.groups()
+            # Nivel por conteo de puntos si es numeración decimal (3.1);
+            # con números romanos (TÍTULO I) no hay forma clara de saber
+            # la profundidad solo por el número, se asume nivel 1.
+            nivel = numero.count(".") + 1 if "." in numero else 1
+            titulo_limpio = titulo.strip(" .")
+            if titulo_limpio:
+                entradas.append({
+                    "nivel": nivel,
+                    "numero": f"{prefijo.capitalize()} {numero}",  # ej. "Artículo 3.1"
+                    "titulo": titulo_limpio,
+                    "pagina": int(pagina),
+                })
+            continue
+
         m2 = PATRON_ANEXO.match(linea)
         if m2:
             entradas.append({
@@ -108,6 +137,47 @@ def _parsear_entradas(texto_pagina: str) -> list[dict]:
             })
 
     return entradas
+
+
+# Palabras que sugieren cada tipo de documento — no es ciencia exacta,
+# solo una pista útil: "Artículo/Cláusula/Inciso" son casi siempre
+# normativos/legales; "Eje/Capítulo/numeración decimal" son más comunes
+# en planes, manuales y documentos técnicos.
+PALABRAS_TIPO_LEGAL = {"artículo", "cláusula", "inciso", "título"}
+PALABRAS_TIPO_TECNICO = {"eje", "capítulo", "sección", "apartado", "anexo"}
+
+
+def clasificar_tipo_documento(entradas: list[dict]) -> str | None:
+    """
+    Estima el tipo de documento a partir de qué palabras predominan en
+    las entradas de su índice — una primera señal automática, útil para
+    sugerir la categoría o para calibrar reglas específicas por tipo de
+    documento más adelante. No es definitivo, es una pista basada en
+    patrones de formato, no en el contenido real.
+    """
+    if not entradas:
+        return None
+
+    conteo_legal = 0
+    conteo_tecnico = 0
+    conteo_numerico_puro = 0  # sin palabra prefijo, ej. "5.5.4 Encadenamientos..."
+
+    for e in entradas:
+        numero = (e.get("numero") or "").lower()
+        primera_palabra = numero.split(" ")[0] if " " in numero else None
+        if primera_palabra in PALABRAS_TIPO_LEGAL:
+            conteo_legal += 1
+        elif primera_palabra in PALABRAS_TIPO_TECNICO:
+            conteo_tecnico += 1
+        elif numero and numero[0].isdigit():
+            conteo_numerico_puro += 1
+
+    total = len(entradas)
+    if conteo_legal / total >= 0.4:
+        return "legal_normativo"
+    if (conteo_tecnico + conteo_numerico_puro) / total >= 0.4:
+        return "tecnico_planificacion"
+    return "indeterminado"
 
 
 def _construir_markdown(entradas: list[dict]) -> str:

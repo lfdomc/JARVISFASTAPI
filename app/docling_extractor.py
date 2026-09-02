@@ -1,0 +1,101 @@
+"""
+Extracción de PDF con Docling — motor de layout con reconocimiento real
+de tablas y estructura, en vez de solo texto plano.
+
+DISEÑO DE SEGURIDAD (importante): Docling necesita descargar modelos de
+Hugging Face en su primer uso. Si esa descarga falla por cualquier razón
+(red bloqueada, timeout, lo que sea), esta función devuelve None — el
+llamador (documents.py) cae de vuelta al extractor de pypdf que ya
+funciona hoy. La subida de un documento NUNCA debe romperse por esto.
+
+Docling exporta cada página como Markdown, tablas incluidas en formato
+de tabla Markdown real — se reutiliza TAL CUAL toda la maquinaria de
+chunking.py que ya construimos (seguimiento continuo de página, unión de
+palabras cortadas por guion, preservación de tablas como unidad) sin
+tocarla, porque ya sabe reconocer y proteger tablas en Markdown.
+"""
+import asyncio
+import logging
+import os
+import tempfile
+
+logger = logging.getLogger("docling_extractor")
+
+TIMEOUT_SEGUNDOS = 180  # una conversión con modelos de layout puede tardar; si se pasa, cae al respaldo
+
+
+def _convertir_sincrono(ruta_archivo: str) -> dict | None:
+    """Corre la conversión real — es bloqueante y puede tardar, por eso
+    se llama desde un hilo aparte (ver extraer_paginas_con_docling).
+
+    Devuelve {"paginas": list[str], "encabezados": list[dict]} o None si
+    falla. Los "encabezados" son un hallazgo extra que Docling permite y
+    que antes no teníamos de ninguna forma: reconoce títulos y encabezados
+    de sección REALES de la estructura del documento — no de un índice
+    impreso que puede no existir. Esto significa que un documento SIN
+    tabla de contenidos puede de todas formas obtener columna 'seccion'
+    poblada, algo imposible con el detector de índice basado en regex."""
+    try:
+        from docling.document_converter import DocumentConverter
+        from docling_core.types.doc import SectionHeaderItem, TitleItem
+
+        conversor = DocumentConverter()
+        resultado = conversor.convert(ruta_archivo)
+        documento = resultado.document
+
+        total_paginas = documento.num_pages()
+        if not total_paginas:
+            return None
+
+        paginas = []
+        for n in range(1, total_paginas + 1):
+            texto_pagina = documento.export_to_markdown(page_no=n) or ""
+            paginas.append(texto_pagina)
+
+        encabezados = []
+        for item, _nivel_arbol in documento.iterate_items():
+            if isinstance(item, (SectionHeaderItem, TitleItem)):
+                pagina = item.prov[0].page_no if item.prov else None
+                if pagina and item.text.strip():
+                    encabezados.append({
+                        "titulo": item.text.strip(),
+                        "pagina": pagina,
+                        "nivel": getattr(item, "level", 1) or 1,
+                        "numero": None,  # Docling no numera automáticamente, solo da el texto real
+                    })
+
+        return {"paginas": paginas, "encabezados": encabezados}
+    except Exception as e:
+        logger.warning(f"[DOCLING] Falló la extracción ({type(e).__name__}: {e}) — se usará el respaldo de pypdf.")
+        return None
+
+
+async def extraer_paginas_con_docling(contenido_bytes: bytes) -> dict | None:
+    """
+    Punto de entrada — recibe los bytes del PDF (igual que el extractor
+    de pypdf), intenta convertir con Docling en un hilo aparte (para no
+    congelar el event loop de FastAPI mientras corre el modelo de
+    layout), con límite de tiempo. Si algo sale mal, o se agota el
+    tiempo, devuelve None — el llamador debe caer al respaldo de pypdf.
+
+    Devuelve {"paginas": list[str], "encabezados": list[dict]} en éxito.
+    """
+    archivo_temporal = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(contenido_bytes)
+            archivo_temporal = tmp.name
+
+        return await asyncio.wait_for(
+            asyncio.to_thread(_convertir_sincrono, archivo_temporal),
+            timeout=TIMEOUT_SEGUNDOS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"[DOCLING] Tiempo de espera agotado ({TIMEOUT_SEGUNDOS}s) — se usará el respaldo de pypdf.")
+        return None
+    except Exception as e:
+        logger.warning(f"[DOCLING] Excepción inesperada ({type(e).__name__}: {e}) — se usará el respaldo de pypdf.")
+        return None
+    finally:
+        if archivo_temporal and os.path.exists(archivo_temporal):
+            os.remove(archivo_temporal)

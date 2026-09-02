@@ -5,6 +5,31 @@ MARCADOR_PAGINA = "\x00PAGINA:{n}\x00"
 PATRON_MARCADOR = re.compile(r"\x00PAGINA:(\d+)\x00")
 PATRON_FILA_TABLA_MD = re.compile(r"^\s*\|.*\|\s*$")
 PATRON_GUION_CORTE = re.compile(r"(?<=\w)\s?-\s*$")
+PATRON_ENCABEZADO_MD = re.compile(r"^\s*#{1,6}\s")
+
+
+def _clasificar_tipo_contenido(texto: str) -> str:
+    """
+    Clasifica un fragmento ya armado como 'tabla', 'titulo' o 'texto' —
+    funciona igual sin importar qué motor extrajo el texto (Docling o
+    pypdf), porque se basa en el patrón del texto final, no en metadatos
+    internos de ningún motor. Con Docling las tablas llegan ya en
+    formato de tabla Markdown real, así que esta detección es más
+    certera que antes (con pypdf puro, una tabla de PDF nunca llegaba a
+    verse como tabla Markdown en absoluto).
+    """
+    lineas = [l for l in texto.split("\n") if l.strip()]
+    if not lineas:
+        return "texto"
+
+    lineas_tabla = sum(1 for l in lineas if PATRON_FILA_TABLA_MD.match(l))
+    if lineas_tabla / len(lineas) >= 0.6:  # la mayoría de las líneas son filas de tabla
+        return "tabla"
+
+    if len(lineas) <= 2 and PATRON_ENCABEZADO_MD.match(lineas[0]):
+        return "titulo"
+
+    return "texto"
 
 
 def _unir_palabras_cortadas(lineas: list[str]) -> list[str]:
@@ -174,11 +199,15 @@ def crear_chunks_con_paginas(paginas: list[str], max_palabras: int = 350) -> lis
             "texto": texto_limpio,
             "pagina_inicio": chunk["pagina_inicio"],
             "pagina_fin": chunk["pagina_fin"],
+            "tipo_contenido": _clasificar_tipo_contenido(texto_limpio),
         })
 
     if not resultado and paginas:
         texto_plano = "\n\n".join(paginas).strip()
         if texto_plano:
-            resultado = [{"texto": texto_plano, "pagina_inicio": 1, "pagina_fin": len(paginas)}]
+            resultado = [{
+                "texto": texto_plano, "pagina_inicio": 1, "pagina_fin": len(paginas),
+                "tipo_contenido": _clasificar_tipo_contenido(texto_plano),
+            }]
 
     return resultado

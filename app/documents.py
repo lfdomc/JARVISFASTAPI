@@ -2,13 +2,16 @@ import io
 import hashlib
 import logging
 import uuid
+import numpy as np
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
 import httpx
 from pypdf import PdfReader
 
 from app.config import settings
 from app.chunking import crear_chunks_markdown, crear_chunks_con_paginas
-from app.indice_extractor import extraer_indice_documento, encontrar_seccion_para_pagina
+from app.indice_extractor import extraer_indice_documento, encontrar_seccion_para_pagina, clasificar_tipo_documento
+from app.calidad_ingesta import auditar_calidad_ingesta, resumen_legible, validar_indice_contra_chunks, resumen_legible_validacion_indice
+from app.docling_extractor import extraer_paginas_con_docling
 from app import gemini_client, logging_utils
 
 logger = logging.getLogger("documents")
@@ -20,14 +23,17 @@ UMBRAL_COHERENCIA_CATEGORIA = 0.45
 
 
 def _similitud_coseno(vec_a: list[float], vec_b: list[float]) -> float:
+    """Similitud de coseno vectorizada con NumPy — antes era un bucle de
+    Python puro sobre 768 dimensiones, llamado por cada fragmento en el
+    filtro de coherencia y el de alta confianza. NumPy calcula esto en C,
+    no interpretado — mejora real de velocidad, no cosmética."""
     if not vec_a or not vec_b or len(vec_a) != len(vec_b):
         return 0.0
-    dot = sum(a * b for a, b in zip(vec_a, vec_b))
-    norm_a = sum(a * a for a in vec_a) ** 0.5
-    norm_b = sum(b * b for b in vec_b) ** 0.5
-    if norm_a == 0 or norm_b == 0:
+    a, b = np.asarray(vec_a, dtype=np.float64), np.asarray(vec_b, dtype=np.float64)
+    norma_a, norma_b = np.linalg.norm(a), np.linalg.norm(b)
+    if norma_a == 0 or norma_b == 0:
         return 0.0
-    return dot / (norm_a * norm_b)
+    return float(np.dot(a, b) / (norma_a * norma_b))
 
 
 def _headers(extra: dict | None = None) -> dict:
@@ -194,7 +200,7 @@ async def _crear_documento_maestro(nombre_archivo: str, contenido_markdown: str,
     return None
 
 
-async def _guardar_fragmento(texto: str, categoria: str, embedding: list, documento_id: str, metadata: dict, pagina_inicio: int | None = None, pagina_fin: int | None = None, seccion: str | None = None) -> bool:
+async def _guardar_fragmento(texto: str, categoria: str, embedding: list, documento_id: str, metadata: dict, pagina_inicio: int | None = None, pagina_fin: int | None = None, seccion: str | None = None, tipo_contenido: str | None = None) -> bool:
     url = f"{_base()}/rest/v1/fragmentos_vectoriales_gdp"
     payload = [{
         "documento_id": documento_id,
@@ -205,6 +211,7 @@ async def _guardar_fragmento(texto: str, categoria: str, embedding: list, docume
         "pagina_inicio": pagina_inicio,
         "pagina_fin": pagina_fin,
         "seccion": seccion,
+        "tipo_contenido": tipo_contenido,
     }]
     async with httpx.AsyncClient(timeout=20.0) as client:
         resp = await client.post(url, json=payload, headers=_headers({"Prefer": "return=minimal"}))
@@ -246,14 +253,29 @@ async def subir_documento(
     contenido_bytes = await archivo.read()
 
     if nombre.lower().endswith(".pdf"):
-        try:
-            paginas = _extraer_texto_pdf(contenido_bytes)
-        except Exception as e:
-            raise HTTPException(status_code=400, detail=f"No se pudo leer el PDF: {e}")
+        # Intenta primero con Docling (mejor reconocimiento de layout y
+        # tablas reales); si falla por cualquier razón (red, timeout,
+        # lo que sea), cae automáticamente al extractor de pypdf que ya
+        # funciona — la subida nunca se rompe por esto.
+        resultado_docling = await extraer_paginas_con_docling(contenido_bytes)
+        encabezados_docling = None
+        if resultado_docling is not None:
+            paginas = resultado_docling["paginas"]
+            encabezados_docling = resultado_docling.get("encabezados") or None
+            motor_extraccion = "docling"
+        else:
+            try:
+                paginas = _extraer_texto_pdf(contenido_bytes)
+                motor_extraccion = "pypdf (respaldo)"
+            except Exception as e:
+                raise HTTPException(status_code=400, detail=f"No se pudo leer el PDF: {e}")
+        logger.info(f"[{nombre}] Extracción con motor: {motor_extraccion}" + (f" ({len(encabezados_docling)} encabezados detectados en la estructura)" if encabezados_docling else ""))
         mime_type = "application/pdf"
     elif nombre.lower().endswith((".md", ".txt")):
         paginas = [contenido_bytes.decode("utf-8", errors="replace")]
         mime_type = "text/markdown"
+        motor_extraccion = "texto plano"
+        encabezados_docling = None
     else:
         raise HTTPException(status_code=400, detail="Solo se aceptan archivos .pdf, .md o .txt")
 
@@ -282,6 +304,25 @@ async def subir_documento(
     # solo tiene sentido para PDFs, que sí traen páginas reales separadas.
     resultado_indice = extraer_indice_documento(paginas) if nombre.lower().endswith(".pdf") else None
     indice_markdown = resultado_indice["markdown"] if resultado_indice else None
+    if resultado_indice:
+        logger.info(f"[{nombre}] Índice detectado (págs. {resultado_indice['pagina_encontrado']}-{resultado_indice['pagina_fin_indice']}, {len(resultado_indice['entradas'])} entradas) — tipo probable: {resultado_indice['tipo_documento_probable']}")
+    elif encabezados_docling:
+        # SIN índice impreso detectable — pero Docling ya reconoció los
+        # encabezados REALES de la estructura del documento (no un texto
+        # impreso, la estructura misma). Esto es algo que antes era
+        # imposible: un documento sin tabla de contenidos ahora también
+        # puede obtener columna 'seccion' poblada por fragmento.
+        # pagina_encontrado/pagina_fin_indice quedan en None a propósito:
+        # no existe una "página del índice impreso" que excluir de la
+        # búsqueda, porque no hay índice impreso — los encabezados vienen
+        # de la estructura, repartidos por todo el documento.
+        resultado_indice = {
+            "entradas": encabezados_docling,
+            "tipo_documento_probable": clasificar_tipo_documento(encabezados_docling),
+            "pagina_encontrado": None,
+            "pagina_fin_indice": None,
+        }
+        logger.info(f"[{nombre}] Sin índice impreso — usando {len(encabezados_docling)} encabezados detectados por Docling en la estructura del documento.")
 
     # Se crea de inmediato en estado PROCESSING — visible en el dashboard
     # como "procesando", pero invisible para las búsquedas (busqueda_hibrida_rrf
@@ -290,10 +331,14 @@ async def subir_documento(
     if not documento_id:
         raise HTTPException(status_code=502, detail="No se pudo crear el documento maestro en Supabase")
 
+    rango_paginas_indice = None
+    if resultado_indice and resultado_indice.get("pagina_encontrado") and resultado_indice.get("pagina_fin_indice"):
+        rango_paginas_indice = (resultado_indice["pagina_encontrado"], resultado_indice["pagina_fin_indice"])
+
     background_tasks.add_task(
         _procesar_documento_en_segundo_plano, documento_id, nombre, paginas, categoria_final,
         resultado_indice["entradas"] if resultado_indice else None,
-        (resultado_indice["pagina_encontrado"], resultado_indice["pagina_fin_indice"]) if resultado_indice else None,
+        rango_paginas_indice,
     )
 
     return {
@@ -302,15 +347,20 @@ async def subir_documento(
         "nombre_archivo": nombre,
         "estado": "processing",
         "indice_detectado": bool(resultado_indice),
+        "tipo_documento_probable": resultado_indice.get("tipo_documento_probable") if resultado_indice else None,
+        "motor_extraccion": motor_extraccion,
         "mensaje": "El documento se está procesando en segundo plano. Actualiza la lista en unos momentos para ver el progreso.",
     }
 
 
-async def _actualizar_estado_documento(documento_id: str, estado: str):
+async def _actualizar_estado_documento(documento_id: str, estado: str, datos_extra: dict | None = None):
+    payload = {"estado": estado}
+    if datos_extra:
+        payload.update(datos_extra)
     async with httpx.AsyncClient(timeout=15.0) as client:
         await client.patch(
             f"{_base()}/rest/v1/documentos_gdp?id=eq.{documento_id}",
-            json={"estado": estado},
+            json=payload,
             headers=_headers({"Prefer": "return=minimal"})
         )
 
@@ -324,6 +374,31 @@ async def _procesar_documento_en_segundo_plano(documento_id: str, nombre: str, p
     try:
         chunks = crear_chunks_con_paginas(paginas)
         texto_completo = "\n\n".join(paginas)
+
+        # AUTOCHEQUEO: convierte en código automático lo que hicimos a
+        # mano toda la sesión de hoy — corre con CUALQUIER documento, sin
+        # importar su tipo. Si algo estructural sale mal, queda
+        # registrado con evidencia concreta, sin depender de que alguien
+        # se acuerde de ir a revisarlo.
+        reporte_calidad = auditar_calidad_ingesta(chunks, len(paginas))
+        logger.info(f"[{nombre}] {resumen_legible(reporte_calidad)}")
+        if not reporte_calidad["ok"]:
+            await logging_utils.registrar_error(
+                "CALIDAD_INGESTA", resumen_legible(reporte_calidad), nombre,
+                "Revisar el reporte completo en documentos_gdp.reporte_calidad_ingesta — no bloquea la subida."
+            )
+
+        # Cruza el ÍNDICE del documento (su propia respuesta correcta)
+        # contra los fragmentos ya trocedos — sin IA, sin datos externos.
+        if entradas_indice:
+            reporte_validacion_indice = validar_indice_contra_chunks(entradas_indice, chunks)
+            logger.info(f"[{nombre}] {resumen_legible_validacion_indice(reporte_validacion_indice)}")
+            reporte_calidad["validacion_indice"] = reporte_validacion_indice
+            if not reporte_validacion_indice["ok"]:
+                await logging_utils.registrar_error(
+                    "CALIDAD_INGESTA_INDICE", resumen_legible_validacion_indice(reporte_validacion_indice), nombre,
+                    "El índice del documento menciona páginas que ningún fragmento cubre — revisar el troceo."
+                )
 
         # PROTECCIÓN 4: el índice del documento ya se guarda aparte, de
         # forma estructurada, en indice_markdown — no debe ADEMÁS quedar
@@ -392,6 +467,7 @@ async def _procesar_documento_en_segundo_plano(documento_id: str, nombre: str, p
             exito = await _guardar_fragmento(
                 chunk["texto"], categoria_final, embedding, documento_id, metadata,
                 pagina_inicio=chunk["pagina_inicio"], pagina_fin=chunk["pagina_fin"], seccion=seccion,
+                tipo_contenido=chunk.get("tipo_contenido"),
             )
             if exito:
                 guardados += 1
@@ -404,7 +480,7 @@ async def _procesar_documento_en_segundo_plano(documento_id: str, nombre: str, p
             )
             return
 
-        await _actualizar_estado_documento(documento_id, "ACTIVE")
+        await _actualizar_estado_documento(documento_id, "ACTIVE", datos_extra={"reporte_calidad_ingesta": reporte_calidad})
         logger.info(f"[{nombre}] procesado en segundo plano: {guardados}/{len(chunks)} fragmentos ({descartados} descartados).")
 
     except Exception as e:
