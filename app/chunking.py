@@ -4,7 +4,7 @@ MIN_CARACTERES_CHUNK_VALIDO = 60
 MARCADOR_PAGINA = "\x00PAGINA:{n}\x00"
 PATRON_MARCADOR = re.compile(r"\x00PAGINA:(\d+)\x00")
 PATRON_FILA_TABLA_MD = re.compile(r"^\s*\|.*\|\s*$")
-PATRON_GUION_CORTE = re.compile(r"(?<=\w)-\s*$")
+PATRON_GUION_CORTE = re.compile(r"(?<=\w)\s?-\s*$")
 
 
 def _unir_palabras_cortadas(lineas: list[str]) -> list[str]:
@@ -15,19 +15,22 @@ def _unir_palabras_cortadas(lineas: list[str]) -> list[str]:
     esto, el corte por tamaño puede caer justo entre esas dos líneas y
     partir la palabra (y a veces la página citada) entre dos fragmentos
     distintos.
+
+    Maneja guiones ENCADENADOS (dos o más palabras cortadas seguidas,
+    ej. "...los pro-" / "cedimientos...cohe-" / "rente...") — sigue
+    uniendo mientras el resultado siga terminando en guion, en vez de
+    unir solo un par y dejar el segundo corte sin resolver.
     """
     resultado = []
     i = 0
     while i < len(lineas):
         linea = lineas[i]
-        if PATRON_GUION_CORTE.search(linea.rstrip()) and i + 1 < len(lineas):
-            siguiente = lineas[i + 1]
-            linea = PATRON_GUION_CORTE.sub("", linea.rstrip()) + siguiente.lstrip()
-            resultado.append(linea)
-            i += 2
-        else:
-            resultado.append(linea)
-            i += 1
+        j = i
+        while PATRON_GUION_CORTE.search(linea.rstrip()) and j + 1 < len(lineas):
+            j += 1
+            linea = PATRON_GUION_CORTE.sub("", linea.rstrip()) + lineas[j].lstrip()
+        resultado.append(linea)
+        i = j + 1
     return resultado
 
 
