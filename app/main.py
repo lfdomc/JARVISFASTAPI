@@ -182,7 +182,7 @@ def _normalizar_para_cache(texto: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[¿?¡!.,;:\"'()\[\]{}]", "", texto.lower())).strip()
 
 
-VERSION_BACKEND = "2026-09-01-seguimiento-continuo-de-pagina"  # cámbialo cada vez que quieras confirmar un despliegue específico
+VERSION_BACKEND = "2026-09-01-indice-excluido-de-busqueda"  # cámbialo cada vez que quieras confirmar un despliegue específico
 
 
 @app.get("/")

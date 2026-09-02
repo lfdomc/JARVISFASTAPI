@@ -293,6 +293,7 @@ async def subir_documento(
     background_tasks.add_task(
         _procesar_documento_en_segundo_plano, documento_id, nombre, paginas, categoria_final,
         resultado_indice["entradas"] if resultado_indice else None,
+        (resultado_indice["pagina_encontrado"], resultado_indice["pagina_fin_indice"]) if resultado_indice else None,
     )
 
     return {
@@ -314,7 +315,7 @@ async def _actualizar_estado_documento(documento_id: str, estado: str):
         )
 
 
-async def _procesar_documento_en_segundo_plano(documento_id: str, nombre: str, paginas: list[str], categoria_final: str, entradas_indice: list[dict] | None = None):
+async def _procesar_documento_en_segundo_plano(documento_id: str, nombre: str, paginas: list[str], categoria_final: str, entradas_indice: list[dict] | None = None, rango_paginas_indice: tuple[int, int] | None = None):
     """Corre DESPUÉS de que la petición HTTP ya respondió — el chunking,
     los embeddings y el chequeo de coherencia pasan aquí, sin bloquear al
     usuario. Cada fragmento guarda su página real de origen (capturada en
@@ -323,6 +324,23 @@ async def _procesar_documento_en_segundo_plano(documento_id: str, nombre: str, p
     try:
         chunks = crear_chunks_con_paginas(paginas)
         texto_completo = "\n\n".join(paginas)
+
+        # PROTECCIÓN 4: el índice del documento ya se guarda aparte, de
+        # forma estructurada, en indice_markdown — no debe ADEMÁS quedar
+        # indexado como fragmento normal de búsqueda. Si queda, una
+        # pregunta por el nombre de una sección puede encontrar la
+        # ENTRADA del índice que la menciona, y citar la página física
+        # del índice (ej. pág. 6) en vez de la página real del contenido
+        # (ej. pág. 50) — exactamente el tipo de error que esto evita.
+        if rango_paginas_indice:
+            p_ini_indice, p_fin_indice = rango_paginas_indice
+            antes = len(chunks)
+            chunks = [
+                c for c in chunks
+                if not (c["pagina_inicio"] >= p_ini_indice and c["pagina_fin"] <= p_fin_indice)
+            ]
+            if len(chunks) < antes:
+                logger.info(f"[{nombre}] Excluidos {antes - len(chunks)} fragmento(s) del índice (págs. {p_ini_indice}-{p_fin_indice}) — ya está guardado aparte, estructurado.")
 
         # PROTECCIÓN 3: coherencia categoría-contenido
         try:

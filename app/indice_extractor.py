@@ -35,8 +35,18 @@ def extraer_indice_documento(paginas: list[str]) -> dict | None:
         "entradas": [              # estructurado, por si se quiere usar programáticamente
             {"nivel": int, "numero": str, "titulo": str, "pagina": int}, ...
         ],
-        "pagina_encontrado": int,  # en qué página del PDF estaba el índice
+        "pagina_encontrado": int,  # en qué página del PDF EMPIEZA el índice
+        "pagina_fin_indice": int,  # en qué página del PDF TERMINA el índice
     }
+    Estas dos últimas son la ubicación FÍSICA del índice en el PDF — no
+    confundir con las páginas que el índice describe en su contenido.
+    Sirven para poder excluir el texto del índice de la ingesta como
+    fragmento buscable normal (ver documents.py) — si el índice queda
+    indexado igual que cualquier otro contenido, una búsqueda por el
+    nombre de una sección puede encontrar la ENTRADA del índice (que
+    menciona esa sección) y citar la página del índice mismo, en vez de
+    la página real donde está el contenido — justo el tipo de error que
+    esto evita de raíz.
     """
     limite = min(len(paginas), PAGINAS_MAX_A_REVISAR)
 
@@ -49,17 +59,25 @@ def extraer_indice_documento(paginas: list[str]) -> dict | None:
         tiene_encabezado = any(PATRON_ENCABEZADO_INDICE.match(l.strip()) for l in lineas[:5])
 
         entradas = _parsear_entradas(texto_pagina)
+        pagina_fin_indice = num_pagina + 1
 
-        # También revisa la página siguiente por si el índice sigue ahí
-        # (son comunes los índices de 2 páginas)
-        if num_pagina + 1 < len(paginas):
-            entradas += _parsear_entradas(paginas[num_pagina + 1])
+        # Sigue revisando páginas siguientes MIENTRAS continúen aportando
+        # entradas de índice — algunos índices ocupan más de 2 páginas.
+        siguiente = num_pagina + 1
+        while siguiente < len(paginas):
+            entradas_siguiente = _parsear_entradas(paginas[siguiente])
+            if len(entradas_siguiente) < 2:  # ya no parece índice, se acabó
+                break
+            entradas += entradas_siguiente
+            pagina_fin_indice = siguiente + 1
+            siguiente += 1
 
         if len(entradas) >= MIN_ENTRADAS_PARA_CONSIDERARLO_INDICE or (tiene_encabezado and len(entradas) >= 3):
             return {
                 "markdown": _construir_markdown(entradas),
                 "entradas": entradas,
                 "pagina_encontrado": num_pagina + 1,
+                "pagina_fin_indice": pagina_fin_indice,
             }
 
     return None
