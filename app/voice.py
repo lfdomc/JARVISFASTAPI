@@ -1,7 +1,10 @@
 import base64
 import httpx
+import logging
 from app.config import settings
 from app import logging_utils
+
+logger = logging.getLogger("voice")
 
 
 async def _descargar_archivo_telegram(file_id: str) -> bytes | None:
@@ -59,7 +62,8 @@ async def transcribir_nota_de_voz(file_id: str) -> str | None:
                             return partes[0].get("text", "").strip()
                 elif resp.status_code == 429:
                     continue
-            except Exception:
+            except Exception as e:
+                logger.warning(f"[TRANSCRIPCION] Clave falló, probando la siguiente: {e}")
                 continue
 
     await logging_utils.registrar_error("TRANSCRIPCION_VOZ", "Todas las claves fallaron al transcribir", file_id)

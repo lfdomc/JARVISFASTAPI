@@ -1,6 +1,9 @@
 import httpx
+import logging
 from app.config import settings
 from app import state, telegram_client, gemini_client, ingestion
+
+logger = logging.getLogger("category_flow")
 
 
 def _headers() -> dict:
@@ -84,8 +87,8 @@ async def _procesar_confirmacion_nota(chat_id: int, texto: str, categoria: str, 
                 porcentaje = round(similar.get("similarity", 0) * 100)
                 extracto = str(similar.get("contenido_chunk", ""))[:150]
                 advertencia_dup = f"\n\n⚠️ *Posible duplicado ({porcentaje}% similar)* en categoría `{similar.get('categoria')}`:\n\"_{extracto}..._\""
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning(f"No se pudo chequear duplicado de nota (no bloquea el guardado): {e}")
 
     token = state.guardar_categoria_pendiente({"tipo": "confirmar_nota", "texto": texto, "categoria": categoria, "telegram_id": telegram_id})
     teclado = [[

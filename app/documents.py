@@ -1,6 +1,7 @@
 import io
 import hashlib
 import logging
+import uuid
 from fastapi import APIRouter, HTTPException, UploadFile, File, Form, BackgroundTasks
 import httpx
 from pypdf import PdfReader
@@ -92,7 +93,7 @@ async def listar_documentos():
 
 
 @router.get("/{documento_id}/fragments")
-async def listar_fragmentos_documento(documento_id: str):
+async def listar_fragmentos_documento(documento_id: uuid.UUID):
     """Fragmentos reales de un documento, para revisar la calidad del
     chunking directamente desde el dashboard."""
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -110,7 +111,7 @@ async def listar_fragmentos_documento(documento_id: str):
 
 
 @router.delete("/{documento_id}")
-async def borrar_documento(documento_id: str):
+async def borrar_documento(documento_id: uuid.UUID):
     """
     Borrado SUAVE (archivado) — nunca borra físicamente. Marca el
     documento como ARCHIVED y busqueda_hibrida_rrf ya sabe excluirlo de
@@ -142,7 +143,7 @@ async def listar_documentos_archivados():
 
 
 @router.post("/{documento_id}/restore")
-async def restaurar_documento(documento_id: str):
+async def restaurar_documento(documento_id: uuid.UUID):
     """Revierte un archivado: vuelve a poner el documento como ACTIVE,
     reapareciendo en las búsquedas y en la lista principal."""
     url = f"{_base()}/rest/v1/documentos_gdp?id=eq.{documento_id}"

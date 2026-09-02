@@ -83,12 +83,31 @@ async def generar_embedding(texto: str) -> list[float] | None:
     return None
 
 
-async def generar_respuesta(payload_contents: list[dict], usar_url_context: bool = False) -> str:
+async def generar_respuesta(payload_contents: list[dict], usar_url_context: bool = False, system_instruction: str | None = None, temperatura: float = 0.2, response_schema: dict | None = None) -> str:
     claves = settings.obtener_pool_claves_gemini()
     if not claves:
         raise RuntimeError("No hay ninguna clave de Gemini configurada.")
 
-    payload = {"contents": payload_contents}
+    generation_config = {"temperature": temperatura}
+    if response_schema:
+        # Fuerza que la respuesta sea JSON con esta forma exacta — usado
+        # en modo profundo para que cada afirmación declare
+        # obligatoriamente de qué fragmento salió, en vez de confiar en
+        # que el modelo escriba un marcador en el lugar correcto dentro
+        # de texto libre.
+        generation_config["responseMimeType"] = "application/json"
+        generation_config["responseSchema"] = response_schema
+
+    payload = {
+        "contents": payload_contents,
+        "generationConfig": generation_config,
+    }
+    if system_instruction:
+        # Las reglas de comportamiento van en el campo dedicado de Gemini
+        # (no mezcladas dentro del texto de la pregunta) — el modelo está
+        # entrenado para priorizar esto más que instrucciones dentro de
+        # un turno normal de conversación. Mismos tokens, mejor organizados.
+        payload["systemInstruction"] = {"parts": [{"text": system_instruction}]}
     if usar_url_context:
         payload["tools"] = [{"url_context": {}}]
 
