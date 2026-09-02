@@ -182,9 +182,12 @@ def _normalizar_para_cache(texto: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[¿?¡!.,;:\"'()\[\]{}]", "", texto.lower())).strip()
 
 
+VERSION_BACKEND = "2026-09-01-troceo-sin-palabras-cortadas"  # cámbialo cada vez que quieras confirmar un despliegue específico
+
+
 @app.get("/")
 async def health_check():
-    return {"status": "ok", "service": "jarvis-api"}
+    return {"status": "ok", "service": "jarvis-api", "version": VERSION_BACKEND}
 
 
 @app.post("/webhook/telegram")

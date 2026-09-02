@@ -4,6 +4,31 @@ MIN_CARACTERES_CHUNK_VALIDO = 60
 MARCADOR_PAGINA = "\x00PAGINA:{n}\x00"
 PATRON_MARCADOR = re.compile(r"\x00PAGINA:(\d+)\x00")
 PATRON_FILA_TABLA_MD = re.compile(r"^\s*\|.*\|\s*$")
+PATRON_GUION_CORTE = re.compile(r"(?<=\w)-\s*$")
+
+
+def _unir_palabras_cortadas(lineas: list[str]) -> list[str]:
+    """
+    Une líneas donde una palabra quedó partida por guion de separación
+    silábica al final de línea — común en texto extraído de PDF, ej.
+    "...mediante el fo-" seguido de "mento de la productividad...". Sin
+    esto, el corte por tamaño puede caer justo entre esas dos líneas y
+    partir la palabra (y a veces la página citada) entre dos fragmentos
+    distintos.
+    """
+    resultado = []
+    i = 0
+    while i < len(lineas):
+        linea = lineas[i]
+        if PATRON_GUION_CORTE.search(linea.rstrip()) and i + 1 < len(lineas):
+            siguiente = lineas[i + 1]
+            linea = PATRON_GUION_CORTE.sub("", linea.rstrip()) + siguiente.lstrip()
+            resultado.append(linea)
+            i += 2
+        else:
+            resultado.append(linea)
+            i += 1
+    return resultado
 
 
 def _agrupar_en_unidades(lineas: list[str]) -> list[str]:
@@ -20,6 +45,7 @@ def _agrupar_en_unidades(lineas: list[str]) -> list[str]:
     plano sin pipes — ahí esta detección no aplica; para preservar esas
     haría falta extracción de tablas con pdfplumber, un cambio aparte.
     """
+    lineas = _unir_palabras_cortadas(lineas)
     unidades = []
     buffer_tabla = []
 
