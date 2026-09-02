@@ -42,15 +42,15 @@ ESQUEMA_RESPUESTA_PROFUNDA = {
         "properties": {
             "texto": {
                 "type": "string",
-                "description": "Una afirmación o idea del análisis, en prosa natural. Cita textual entre comillas solo si es literal del fragmento.",
+                "description": "Una afirmación o idea del análisis, en prosa natural. Cita textual entre comillas solo si es literal del fragmento. NUNCA incluyas corchetes ni marcadores como '[F1]' dentro de este campo — usa el campo 'fragmentos' para eso.",
             },
-            "fragmento": {
-                "type": "integer",
-                "nullable": True,
-                "description": "El número del fragmento (ej. 3 para el fragmento marcado 'Fragmento 3') de donde salió este dato. Usa null si es análisis/interpretación propia sin un fragmento específico que lo respalde.",
+            "fragmentos": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": "Lista de números de fragmento (ej. [3] si es uno solo, [1, 3] si esta afirmación combina datos de los fragmentos 1 y 3) de donde salió este dato. Usa una lista vacía [] si es análisis/interpretación propia sin un fragmento específico que lo respalde.",
             },
         },
-        "required": ["texto"],
+        "required": ["texto", "fragmentos"],
     },
 }
 
@@ -71,7 +71,9 @@ def _ensamblar_respuesta_estructurada(items: list[dict], mapa_fragmentos: dict) 
     """Une las afirmaciones del JSON en un párrafo, sustituyendo cada
     número de fragmento por la página/sección REAL — misma sustitución
     determinística de siempre, solo que ahora parte de datos
-    estructurados en vez de parsear marcadores de texto libre."""
+    estructurados en vez de parsear marcadores de texto libre. Soporta
+    varias fragmentos por afirmación (ej. una frase que combina dos
+    datos)."""
     nombres_documentos = {f.get('nombre_documento') for f in mapa_fragmentos.values() if f.get('nombre_documento')}
     mostrar_documento = len(nombres_documentos) > 1
 
@@ -81,21 +83,35 @@ def _ensamblar_respuesta_estructurada(items: list[dict], mapa_fragmentos: dict) 
         if not texto:
             continue
 
-        cita = ""
-        frag_num = item.get("fragmento")
-        if frag_num is not None:
-            f = mapa_fragmentos.get(f"F{frag_num}")
-            if f:
-                metadata = f.get('metadata') or {}
-                p_ini = f.get('pagina_inicio') or metadata.get('pagina_inicio')
-                p_fin = f.get('pagina_fin') or metadata.get('pagina_fin') or p_ini
-                seccion = f.get('seccion')
-                if p_ini:
-                    pagina_str = f"pág. {p_ini}" if p_ini == p_fin else f"págs. {p_ini}-{p_fin}"
-                    doc_str = f"{f.get('nombre_documento')}, " if mostrar_documento else ""
-                    cita = f" ({doc_str}{pagina_str}{', sección ' + seccion if seccion else ''})"
+        # Limpieza de seguridad: por si el modelo, a pesar de la
+        # instrucción, deja algún marcador de texto tipo [F1] o [F1, F3]
+        # dentro del campo "texto" — se quita, ya que la cita real se
+        # agrega aparte a partir del campo "fragmentos" estructurado.
+        texto = re.sub(r'\s*\[F\d+(?:\s*,\s*F?\d+)*\]', '', texto).strip()
+        if not texto:
+            continue
 
-        partes.append(f"{texto}{cita}")
+        citas = []
+        numeros_fragmento = item.get("fragmentos") or []
+        if isinstance(numeros_fragmento, int):  # por si el modelo manda un entero suelto en vez de lista
+            numeros_fragmento = [numeros_fragmento]
+
+        for frag_num in numeros_fragmento:
+            f = mapa_fragmentos.get(f"F{frag_num}")
+            if not f:
+                continue
+            metadata = f.get('metadata') or {}
+            p_ini = f.get('pagina_inicio') or metadata.get('pagina_inicio')
+            p_fin = f.get('pagina_fin') or metadata.get('pagina_fin') or p_ini
+            seccion = f.get('seccion')
+            if not p_ini:
+                continue
+            pagina_str = f"pág. {p_ini}" if p_ini == p_fin else f"págs. {p_ini}-{p_fin}"
+            doc_str = f"{f.get('nombre_documento')}, " if mostrar_documento else ""
+            citas.append(f"{doc_str}{pagina_str}{', sección ' + seccion if seccion else ''}")
+
+        cita_final = f" ({'; '.join(citas)})" if citas else ""
+        partes.append(f"{texto}{cita_final}")
 
     return " ".join(partes)
 
@@ -407,14 +423,14 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
                 "- FORMATO DE RESPUESTA OBLIGATORIO: no respondas con texto libre. Responde ÚNICAMENTE "
                 "con un arreglo JSON donde cada elemento tiene dos campos: \"texto\" (una afirmación de tu "
                 "análisis, en prosa natural — cita literal entre comillas SOLO si es texto exacto del "
-                "fragmento) y \"fragmento\" (el número entero del fragmento de donde sacaste ese dato — "
-                "ej. si la etiqueta dice \"Marcador: F3\", el número es 3 — o null si es análisis/"
-                "interpretación tuya sin un fragmento específico que lo respalde). Parte cada afirmación "
-                "factual distinta en su propio elemento del arreglo, cada una con su propio número de "
-                "fragmento — nunca combines datos de fragmentos distintos en un solo elemento. NUNCA "
-                "escribas tú mismo un número de página en el campo \"texto\" — el número de fragmento en "
-                "el campo \"fragmento\" es lo único que el sistema usa para agregar la página real "
-                "después, automáticamente.\n"
+                "fragmento, y NUNCA incluyas marcadores como [F1] dentro de este campo) y \"fragmentos\" "
+                "(una LISTA con los números enteros de los fragmentos de donde sacaste ese dato — ej. [3] "
+                "si es de uno solo, [1, 3] si esta afirmación combina datos de los fragmentos 1 y 3, o [] "
+                "si es análisis/interpretación tuya sin un fragmento específico que lo respalde). Si es "
+                "posible, prefiere partir cada afirmación factual distinta en su propio elemento del "
+                "arreglo con un solo fragmento cada una, en vez de combinar varias — pero si de verdad "
+                "necesitas combinar dos fragmentos en una misma afirmación, usa la lista con ambos "
+                "números, nunca escribas los marcadores como texto.\n"
                 "- NOMBRES TEXTUALES EN DOCUMENTOS DE POLÍTICAS PÚBLICAS, NORMAS O CONTRATOS: cuando el "
                 "documento define el nombre de un indicador, meta, ley, artículo o cláusula, cópialo "
                 "entre comillas tal cual aparece en el fragmento — nunca lo parafrasees ni lo combines "
