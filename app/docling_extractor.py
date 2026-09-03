@@ -32,7 +32,10 @@ from app.config import settings
 
 logger = logging.getLogger("docling_extractor")
 
-TIMEOUT_SEGUNDOS = 180  # una conversión con modelos de layout puede tardar; si se pasa, cae al respaldo
+TIMEOUT_SEGUNDOS = 600  # antes 180 — ahora que la extracción corre en segundo
+# plano (ya no bloquea la petición HTTP del usuario), tiene sentido darle a
+# Docling más margen para terminar documentos grandes en vez de rendirse
+# rápido y caer a pypdf de forma innecesaria.
 MODELO_DESCRIPCION_IMAGENES = "gemini-2.5-flash"
 PROMPT_DESCRIPCION_IMAGENES = (
     "Describe este gráfico o imagen en 2-3 oraciones, en español. Si es un "

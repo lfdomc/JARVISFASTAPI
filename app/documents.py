@@ -254,28 +254,24 @@ async def subir_documento(
     subcategoria: str | None = Form(None),
 ):
     """
-    Acepta .pdf, .md o .txt. Extrae el texto rápido (síncrono, es solo
-    parseo local) y valida duplicados de inmediato — pero el chunking +
-    generación de embeddings (lo que de verdad tarda) corre en SEGUNDO
-    PLANO, para no dejar al usuario esperando con la pantalla congelada
-    en archivos grandes.
+    Acepta .pdf, .md o .txt.
 
-    Protecciones aplicadas (mismas que en la ingesta de Firecrawl):
-    1. Duplicados: rechaza si ya existe un documento con el mismo
-       contenido exacto (comparado por hash SHA-256).
-    2. Filtro de relevancia por fragmento: descarta fragmentos que no se
-       parecen lo suficiente al título+categoría del documento.
-    3. Chequeo de coherencia categoría-contenido: avisa (no bloquea) si
-       el documento no encaja con lo que ya existe en esa categoría.
+    IMPORTANTE (corregido hoy): para PDFs, la extracción de texto YA NO
+    corre aquí de forma síncrona. Con Docling activado (OCR + layout +
+    tablas, todo en CPU), extraer un documento grande puede tardar
+    varios minutos — si eso corre dentro de la petición HTTP, el
+    navegador o el proxy de Railway puede cortar la conexión mucho antes
+    de que termine, y la subida "no hace nada" desde la perspectiva del
+    usuario, aunque el servidor sí estuviera trabajando. Ahora la
+    extracción (Docling o pypdf), la detección de índice, el chequeo de
+    duplicados y el chunking/embeddings — todo lo que de verdad tarda —
+    corre en SEGUNDO PLANO. La petición HTTP solo crea un registro
+    "PROCESSING" y responde de inmediato.
+
+    Para .md/.txt esto no aplica — decodificar texto plano es instantáneo,
+    así que ese camino sigue siendo síncrono, sin necesidad de complicarlo.
     """
     nombre = archivo.filename or "documento_sin_nombre"
-    # Subcategoría: se puede mandar explícita (campo separado) o con la
-    # convención de "/" dentro de la categoría misma (ej. "MANUALES/NOBILIS")
-    # — siempre se separa primero por "/" (para que la categoría nunca se
-    # quede con el "/" incluido), y el campo explícito, si viene, tiene
-    # prioridad sobre lo que traiga la barra. Con "/" en la categoría, el
-    # filtro de búsqueda por categoría (que ya usa coincidencia parcial)
-    # sigue funcionando igual sin tocar la función de búsqueda.
     categoria_input = categoria.strip()
     subcategoria_de_barra = None
     if "/" in categoria_input:
@@ -288,10 +284,79 @@ async def subir_documento(
     contenido_bytes = await archivo.read()
 
     if nombre.lower().endswith(".pdf"):
-        # Intenta primero con Docling (mejor reconocimiento de layout y
-        # tablas reales); si falla por cualquier razón (red, timeout,
-        # lo que sea), cae automáticamente al extractor de pypdf que ya
-        # funciona — la subida nunca se rompe por esto.
+        # Registro placeholder inmediato — el contenido real, el índice
+        # y el chequeo de duplicados se resuelven en segundo plano, una
+        # vez que la extracción (que puede tardar) haya terminado.
+        documento_id = await _crear_documento_maestro(
+            nombre, "", categoria_final, "application/pdf", estado="PROCESSING", subcategoria=subcategoria_final
+        )
+        if not documento_id:
+            raise HTTPException(status_code=502, detail="No se pudo crear el documento maestro en Supabase")
+
+        background_tasks.add_task(
+            _extraer_e_indexar_pdf_en_segundo_plano, documento_id, nombre, contenido_bytes, categoria_final, subcategoria_final,
+        )
+
+        return {
+            "ok": True,
+            "documento_id": documento_id,
+            "nombre_archivo": nombre,
+            "estado": "processing",
+            "mensaje": "El documento se está extrayendo y procesando en segundo plano — la extracción con Docling puede tardar varios minutos en documentos grandes. Actualiza la lista para ver el progreso.",
+        }
+
+    elif nombre.lower().endswith((".md", ".txt")):
+        # Camino rápido, sin cambios — decodificar texto plano es instantáneo.
+        paginas = [contenido_bytes.decode("utf-8", errors="replace")]
+        texto = "\n\n".join(paginas)
+        if not texto.strip():
+            raise HTTPException(status_code=400, detail="El archivo no contiene texto extraíble")
+
+        hash_contenido = hashlib.sha256(texto.encode("utf-8")).hexdigest()
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            dup_resp = await client.get(
+                f"{_base()}/rest/v1/documentos_gdp?hash_sha256=eq.{hash_contenido}&estado=in.(ACTIVE,PROCESSING)&select=id,nombre_archivo",
+                headers=_headers()
+            )
+            if dup_resp.status_code == 200:
+                existentes = dup_resp.json()
+                if existentes:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Este contenido ya está indexado (o en proceso) como \"{existentes[0]['nombre_archivo']}\"."
+                    )
+
+        documento_id = await _crear_documento_maestro(nombre, texto, categoria_final, "text/markdown", estado="PROCESSING", subcategoria=subcategoria_final)
+        if not documento_id:
+            raise HTTPException(status_code=502, detail="No se pudo crear el documento maestro en Supabase")
+
+        background_tasks.add_task(
+            _procesar_documento_en_segundo_plano, documento_id, nombre, paginas, categoria_final,
+            None, None, subcategoria_final, None,
+        )
+
+        return {
+            "ok": True,
+            "documento_id": documento_id,
+            "nombre_archivo": nombre,
+            "estado": "processing",
+            "motor_extraccion": "texto plano",
+            "subcategoria": subcategoria_final,
+            "mensaje": "El documento se está procesando en segundo plano. Actualiza la lista en unos momentos para ver el progreso.",
+        }
+    else:
+        raise HTTPException(status_code=400, detail="Solo se aceptan archivos .pdf, .md o .txt")
+
+
+async def _extraer_e_indexar_pdf_en_segundo_plano(documento_id: str, nombre: str, contenido_bytes: bytes, categoria_final: str, subcategoria_final: str | None):
+    """
+    Todo lo que antes corría DENTRO de la petición HTTP para PDFs — la
+    extracción (Docling con respaldo a pypdf), la detección de índice, y
+    el chequeo de duplicados — ahora corre aquí, después de que la
+    petición ya respondió. Al final, llama a _procesar_documento_en_segundo_plano
+    para el resto (chunking + embeddings), igual que antes.
+    """
+    try:
         resultado_docling = await extraer_paginas_con_docling(contenido_bytes)
         encabezados_docling = None
         if resultado_docling is not None:
@@ -299,96 +364,66 @@ async def subir_documento(
             encabezados_docling = resultado_docling.get("encabezados") or None
             motor_extraccion = "docling"
         else:
-            try:
-                paginas = _extraer_texto_pdf(contenido_bytes)
-                motor_extraccion = "pypdf (respaldo)"
-            except Exception as e:
-                raise HTTPException(status_code=400, detail=f"No se pudo leer el PDF: {e}")
+            paginas = _extraer_texto_pdf(contenido_bytes)
+            motor_extraccion = "pypdf (respaldo)"
         logger.info(f"[{nombre}] Extracción con motor: {motor_extraccion}" + (f" ({len(encabezados_docling)} encabezados detectados en la estructura)" if encabezados_docling else ""))
-        mime_type = "application/pdf"
-    elif nombre.lower().endswith((".md", ".txt")):
-        paginas = [contenido_bytes.decode("utf-8", errors="replace")]
-        mime_type = "text/markdown"
-        motor_extraccion = "texto plano"
-        encabezados_docling = None
-    else:
-        raise HTTPException(status_code=400, detail="Solo se aceptan archivos .pdf, .md o .txt")
 
-    texto = "\n\n".join(paginas)
-    if not texto.strip():
-        raise HTTPException(status_code=400, detail="El archivo no contiene texto extraíble")
+        texto = "\n\n".join(paginas)
+        if not texto.strip():
+            await _actualizar_estado_documento(documento_id, "FAILED")
+            await logging_utils.registrar_error("SUBIDA_DOCUMENTO", "El archivo no contiene texto extraíble", nombre)
+            return
 
-    # PROTECCIÓN 1: duplicados por contenido exacto (hash SHA-256) — se
-    # revisa YA, antes de encolar nada, para fallar rápido sin desperdiciar
-    # trabajo en segundo plano.
-    hash_contenido = hashlib.sha256(texto.encode("utf-8")).hexdigest()
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        dup_resp = await client.get(
-            f"{_base()}/rest/v1/documentos_gdp?hash_sha256=eq.{hash_contenido}&estado=in.(ACTIVE,PROCESSING)&select=id,nombre_archivo",
-            headers=_headers()
-        )
-        if dup_resp.status_code == 200:
-            existentes = dup_resp.json()
-            if existentes:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Este contenido ya está indexado (o en proceso) como \"{existentes[0]['nombre_archivo']}\"."
+        # Chequeo de duplicados — ahora aquí, DESPUÉS de la extracción,
+        # ya que depende del texto extraído. Si es duplicado, se marca
+        # este registro como FAILED con el motivo, en vez de rechazar la
+        # petición HTTP original (que ya respondió hace rato).
+        hash_contenido = hashlib.sha256(texto.encode("utf-8")).hexdigest()
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            dup_resp = await client.get(
+                f"{_base()}/rest/v1/documentos_gdp?hash_sha256=eq.{hash_contenido}&estado=in.(ACTIVE,PROCESSING)&id=neq.{documento_id}&select=id,nombre_archivo",
+                headers=_headers()
+            )
+            if dup_resp.status_code == 200 and dup_resp.json():
+                existente = dup_resp.json()[0]
+                await _actualizar_estado_documento(documento_id, "FAILED")
+                await logging_utils.registrar_error(
+                    "SUBIDA_DOCUMENTO", f"Contenido duplicado de \"{existente['nombre_archivo']}\"", nombre,
+                    "No bloqueaba la petición porque la extracción se movió a segundo plano — se detectó después."
                 )
+                return
 
-    # Detecta el índice/tabla de contenidos del documento (si tiene uno) —
-    # solo tiene sentido para PDFs, que sí traen páginas reales separadas.
-    resultado_indice = extraer_indice_documento(paginas) if nombre.lower().endswith(".pdf") else None
-    indice_markdown = resultado_indice["markdown"] if resultado_indice else None
-    if resultado_indice:
-        logger.info(f"[{nombre}] Índice detectado (págs. {resultado_indice['pagina_encontrado']}-{resultado_indice['pagina_fin_indice']}, {len(resultado_indice['entradas'])} entradas) — tipo probable: {resultado_indice['tipo_documento_probable']}")
-    elif encabezados_docling:
-        # SIN índice impreso detectable — pero Docling ya reconoció los
-        # encabezados REALES de la estructura del documento (no un texto
-        # impreso, la estructura misma). Esto es algo que antes era
-        # imposible: un documento sin tabla de contenidos ahora también
-        # puede obtener columna 'seccion' poblada por fragmento.
-        # pagina_encontrado/pagina_fin_indice quedan en None a propósito:
-        # no existe una "página del índice impreso" que excluir de la
-        # búsqueda, porque no hay índice impreso — los encabezados vienen
-        # de la estructura, repartidos por todo el documento.
-        resultado_indice = {
-            "entradas": encabezados_docling,
-            "tipo_documento_probable": clasificar_tipo_documento(encabezados_docling),
-            "pagina_encontrado": None,
-            "pagina_fin_indice": None,
-        }
-        logger.info(f"[{nombre}] Sin índice impreso — usando {len(encabezados_docling)} encabezados detectados por Docling en la estructura del documento.")
+        resultado_indice = extraer_indice_documento(paginas)
+        indice_markdown = resultado_indice["markdown"] if resultado_indice else None
+        if resultado_indice:
+            logger.info(f"[{nombre}] Índice detectado (págs. {resultado_indice['pagina_encontrado']}-{resultado_indice['pagina_fin_indice']}, {len(resultado_indice['entradas'])} entradas) — tipo probable: {resultado_indice['tipo_documento_probable']}")
+        elif encabezados_docling:
+            resultado_indice = {
+                "entradas": encabezados_docling,
+                "tipo_documento_probable": clasificar_tipo_documento(encabezados_docling),
+                "pagina_encontrado": None,
+                "pagina_fin_indice": None,
+            }
+            logger.info(f"[{nombre}] Sin índice impreso — usando {len(encabezados_docling)} encabezados detectados por Docling en la estructura del documento.")
 
-    # Se crea de inmediato en estado PROCESSING — visible en el dashboard
-    # como "procesando", pero invisible para las búsquedas (busqueda_hibrida_rrf
-    # solo considera documentos ACTIVE) hasta que termine.
-    documento_id = await _crear_documento_maestro(nombre, texto, categoria_final, mime_type, estado="PROCESSING", indice_markdown=indice_markdown, subcategoria=subcategoria_final)
-    if not documento_id:
-        raise HTTPException(status_code=502, detail="No se pudo crear el documento maestro en Supabase")
+        # Actualiza el registro placeholder con el contenido e índice reales
+        await _actualizar_estado_documento(
+            documento_id, "PROCESSING",
+            datos_extra={"contenido_markdown": texto, "indice_markdown": indice_markdown, "hash_sha256": hash_contenido},
+        )
 
-    rango_paginas_indice = None
-    if resultado_indice and resultado_indice.get("pagina_encontrado") and resultado_indice.get("pagina_fin_indice"):
-        rango_paginas_indice = (resultado_indice["pagina_encontrado"], resultado_indice["pagina_fin_indice"])
+        rango_paginas_indice = None
+        if resultado_indice and resultado_indice.get("pagina_encontrado") and resultado_indice.get("pagina_fin_indice"):
+            rango_paginas_indice = (resultado_indice["pagina_encontrado"], resultado_indice["pagina_fin_indice"])
 
-    background_tasks.add_task(
-        _procesar_documento_en_segundo_plano, documento_id, nombre, paginas, categoria_final,
-        resultado_indice["entradas"] if resultado_indice else None,
-        rango_paginas_indice,
-        subcategoria_final,
-        contenido_bytes if nombre.lower().endswith(".pdf") else None,
-    )
-
-    return {
-        "ok": True,
-        "documento_id": documento_id,
-        "nombre_archivo": nombre,
-        "estado": "processing",
-        "indice_detectado": bool(resultado_indice),
-        "tipo_documento_probable": resultado_indice.get("tipo_documento_probable") if resultado_indice else None,
-        "motor_extraccion": motor_extraccion,
-        "subcategoria": subcategoria_final,
-        "mensaje": "El documento se está procesando en segundo plano. Actualiza la lista en unos momentos para ver el progreso.",
-    }
+        await _procesar_documento_en_segundo_plano(
+            documento_id, nombre, paginas, categoria_final,
+            resultado_indice["entradas"] if resultado_indice else None,
+            rango_paginas_indice, subcategoria_final, contenido_bytes,
+        )
+    except Exception as e:
+        await _actualizar_estado_documento(documento_id, "FAILED")
+        await logging_utils.registrar_error("SUBIDA_DOCUMENTO", f"Excepción extrayendo el PDF en segundo plano: {e}", nombre)
 
 
 async def _actualizar_estado_documento(documento_id: str, estado: str, datos_extra: dict | None = None):
