@@ -61,6 +61,9 @@ def _configurar_pipeline_con_descripcion_imagenes():
             params={"model": MODELO_DESCRIPCION_IMAGENES},
             prompt=PROMPT_DESCRIPCION_IMAGENES,
             timeout=45.0,
+            picture_area_threshold=0.01,  # antes 0.05 (5%) por defecto — muy
+            # alto para gráficos incrustados en una página con texto (no
+            # ocupan página completa); con 1% se capturan también esos.
         )
     else:
         logger.warning("[DOCLING] Sin claves de Gemini configuradas — se omite la descripción de imágenes.")
@@ -82,7 +85,7 @@ def _convertir_sincrono(ruta_archivo: str) -> dict | None:
     try:
         from docling.document_converter import DocumentConverter, PdfFormatOption
         from docling.datamodel.base_models import InputFormat
-        from docling_core.types.doc import SectionHeaderItem, TitleItem
+        from docling_core.types.doc import SectionHeaderItem, TitleItem, PictureItem
 
         opciones = _configurar_pipeline_con_descripcion_imagenes()
         conversor = DocumentConverter(
@@ -99,6 +102,18 @@ def _convertir_sincrono(ruta_archivo: str) -> dict | None:
         for n in range(1, total_paginas + 1):
             texto_pagina = documento.export_to_markdown(page_no=n) or ""
             paginas.append(texto_pagina)
+
+        # Diagnóstico explícito de la descripción de imágenes — para
+        # confirmar en el log de Railway, sin adivinar, cuántas imágenes
+        # se detectaron y a cuántas se les generó descripción real.
+        imagenes_totales = 0
+        imagenes_con_descripcion = 0
+        for item, _nivel in documento.iterate_items():
+            if isinstance(item, PictureItem):
+                imagenes_totales += 1
+                if item.annotations:
+                    imagenes_con_descripcion += 1
+        logger.info(f"[DOCLING] Imágenes detectadas: {imagenes_totales}, con descripción generada: {imagenes_con_descripcion}")
 
         encabezados = []
         for item, _nivel_arbol in documento.iterate_items():

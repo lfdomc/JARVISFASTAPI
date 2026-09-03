@@ -134,7 +134,16 @@ def _parsear_entradas(texto_pagina: str) -> list[dict]:
                     "titulo": titulo_limpio,
                     "pagina": int(pagina),
                 })
-            continue
+                continue
+            # BUG REAL ENCONTRADO HOY: líneas tipo "ANEXO 1        147"
+            # (sin título real entre el número y la página) hacían
+            # coincidir este patrón general PRIMERO, con un "título"
+            # que quedaba vacío tras limpiar — y como el código hacía
+            # `continue` de inmediato, la línea se descartaba en
+            # silencio sin darle oportunidad a PATRON_ANEXO (el patrón
+            # específico para este formato exacto, sin título) más
+            # abajo. Ahora, si el título queda vacío, se sigue probando
+            # con los patrones siguientes en vez de descartar de una vez.
 
         m2 = PATRON_ANEXO.match(linea)
         if m2:

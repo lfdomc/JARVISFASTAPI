@@ -80,6 +80,17 @@ class TestFormatoPalabraPrimeroIngles:
         assert len(entradas) == 1
         assert entradas[0]["pagina"] == 45
 
+    def test_anexo_sin_titulo_no_se_pierde(self):
+        """El bug real de hoy: 'ANEXO 1            147' (sin texto de
+        título entre el número y la página) hacía que el patrón general
+        de palabra-primero lo atrapara con un título vacío, y la entrada
+        se descartaba en silencio sin darle oportunidad al patrón
+        específico de anexo — perdiendo por completo la entrada."""
+        entradas = _parsear_entradas("ANEXO 1            147")
+        assert len(entradas) == 1
+        assert entradas[0]["pagina"] == 147
+        assert entradas[0]["titulo"] == "ANEXO 1"
+
     def test_clasificacion_legal_en_ingles(self):
         entradas = _parsear_entradas("\n".join([
             "Article 1. Scope. 5", "Article 2. Definitions. 7", "Article 3. Requirements. 10",

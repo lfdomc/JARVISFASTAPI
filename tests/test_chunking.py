@@ -9,7 +9,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.chunking import crear_chunks_con_paginas, _unir_palabras_cortadas
+from app.chunking import crear_chunks_con_paginas, _unir_palabras_cortadas, marcar_paginas_vacias
 
 
 def _marcar_paginas(paginas: list[str]) -> str:
@@ -103,6 +103,70 @@ class TestSeguimientoContinuoDePagina:
             assert not c["texto"].rstrip().endswith("-"), f"Fragmento termina en guion: {c['texto'][-50:]!r}"
 
 
+class TestFronterasDeSeccion:
+    """El caso real: páginas 145-146 casi vacías hacían que un fragmento
+    se extendiera desde plena sección 6.2 hasta adentro de Anexo 1 —
+    ahora cada entrada del índice es un corte obligatorio."""
+
+    def test_fragmento_no_cruza_frontera_de_seccion(self):
+        paginas = [f"Contenido de la sección A, página {i}. " * 10 + "\n" for i in range(1, 4)]
+        paginas += [f"Contenido de la sección B, página {i}. " * 10 + "\n" for i in range(4, 7)]
+        # Frontera: la sección B empieza en la página 4
+        chunks = crear_chunks_con_paginas(paginas, max_palabras=200, paginas_frontera={4})
+        for c in chunks:
+            assert not (c["pagina_inicio"] < 4 and c["pagina_fin"] >= 4), \
+                f"Fragmento {c['pagina_inicio']}-{c['pagina_fin']} cruza la frontera de la página 4"
+
+    def test_fragmento_nuevo_arranca_en_la_pagina_frontera_real(self):
+        """El bug específico de hoy: el corte caía en el lugar correcto,
+        pero el fragmento nuevo se etiquetaba con la página VIEJA (antes
+        de la frontera), no con la página real donde empieza — mismo
+        patrón del bug de 'un paso atrás' que ya se había corregido para
+        cortes por tamaño, pero no se había corregido para cortes por
+        frontera de sección."""
+        paginas = ["Página 1 con algo de contenido normal aquí de sobra.\n"]
+        paginas += ["Página 2, casi vacía\n"]  # muy poco contenido
+        paginas += ["ANEXO 1: contenido real de la nueva sección que empieza aquí mismo.\n"] * 3
+        chunks = crear_chunks_con_paginas(paginas, max_palabras=200, paginas_frontera={3})
+        fragmentos_de_anexo = [c for c in chunks if "ANEXO 1" in c["texto"]]
+        assert len(fragmentos_de_anexo) >= 1
+        assert fragmentos_de_anexo[0]["pagina_inicio"] == 3  # no 2, la página vieja
+
+    def test_sin_fronteras_se_comporta_igual_que_antes(self):
+        """Sin paginas_frontera (o vacío), el comportamiento debe ser
+        idéntico al troceo normal por tamaño — no debe forzar cortes
+        de la nada."""
+        paginas = [f"Contenido de relleno normal en la página {i}. " * 10 for i in range(1, 6)]
+        chunks_sin_frontera = crear_chunks_con_paginas(paginas, max_palabras=200)
+        chunks_frontera_vacia = crear_chunks_con_paginas(paginas, max_palabras=200, paginas_frontera=set())
+        assert len(chunks_sin_frontera) == len(chunks_frontera_vacia)
+
+
+class TestMarcadoDePaginasVacias:
+    def test_pagina_vacia_se_marca(self):
+        paginas = ["", "Contenido real y sustancial de la página dos, con bastante texto útil."]
+        marcadas = marcar_paginas_vacias(paginas)
+        assert "sin texto extraíble" in marcadas[0]
+        assert marcadas[1] == paginas[1]  # la página con contenido real no se toca
+
+    def test_pagina_con_poco_texto_se_marca(self):
+        paginas = ["Anexos"]  # 6 caracteres, como el caso real de hoy
+        marcadas = marcar_paginas_vacias(paginas)
+        assert "sin texto extraíble" in marcadas[0]
+
+    def test_marcador_termina_en_salto_de_linea(self):
+        """El bug real: sin el salto de línea final, el marcador se pega
+        al texto de la página siguiente, fusionando sus marcadores de
+        página en una sola unidad indivisible."""
+        marcadas = marcar_paginas_vacias([""])
+        assert marcadas[0].endswith("\n")
+
+    def test_chunk_vacio_se_clasifica_como_tal(self):
+        from app.chunking import _clasificar_tipo_contenido
+        marcadas = marcar_paginas_vacias([""])
+        assert _clasificar_tipo_contenido(marcadas[0]) == "vacia_o_imagen"
+
+
 class TestPreservacionDeTablas:
     def test_tabla_markdown_no_se_parte(self):
         tabla = "\n".join([
@@ -142,3 +206,17 @@ class TestClasificacionTipoContenido:
         """El campo debe venir en cada fragmento que arma crear_chunks_con_paginas."""
         chunks = crear_chunks_con_paginas(["Texto de una página normal con suficiente contenido para pasar el mínimo."])
         assert all("tipo_contenido" in c for c in chunks)
+
+
+class TestDeteccionDeIdioma:
+    def test_espanol_se_detecta(self):
+        from app.chunking import _detectar_idioma
+        assert _detectar_idioma("El turismo en Costa Rica ha crecido significativamente en los últimos años.") == "es"
+
+    def test_ingles_se_detecta(self):
+        from app.chunking import _detectar_idioma
+        assert _detectar_idioma("Tourism in Costa Rica has grown significantly over the last several years.") == "en"
+
+    def test_chunks_incluyen_idioma(self):
+        chunks = crear_chunks_con_paginas(["Texto de una página normal con suficiente contenido para pasar el mínimo."])
+        assert all("idioma" in c for c in chunks)

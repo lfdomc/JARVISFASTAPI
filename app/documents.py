@@ -8,10 +8,11 @@ import httpx
 from pypdf import PdfReader
 
 from app.config import settings
-from app.chunking import crear_chunks_markdown, crear_chunks_con_paginas
+from app.chunking import crear_chunks_markdown, crear_chunks_con_paginas, marcar_paginas_vacias
 from app.indice_extractor import extraer_indice_documento, encontrar_seccion_para_pagina, clasificar_tipo_documento
 from app.calidad_ingesta import auditar_calidad_ingesta, resumen_legible, validar_indice_contra_chunks, resumen_legible_validacion_indice
 from app.docling_extractor import extraer_paginas_con_docling
+from app.analisis_visual import analizar_paginas_con_poco_texto
 from app import gemini_client, logging_utils
 
 logger = logging.getLogger("documents")
@@ -374,6 +375,7 @@ async def subir_documento(
         resultado_indice["entradas"] if resultado_indice else None,
         rango_paginas_indice,
         subcategoria_final,
+        contenido_bytes if nombre.lower().endswith(".pdf") else None,
     )
 
     return {
@@ -401,14 +403,23 @@ async def _actualizar_estado_documento(documento_id: str, estado: str, datos_ext
         )
 
 
-async def _procesar_documento_en_segundo_plano(documento_id: str, nombre: str, paginas: list[str], categoria_final: str, entradas_indice: list[dict] | None = None, rango_paginas_indice: tuple[int, int] | None = None, subcategoria_final: str | None = None):
+async def _procesar_documento_en_segundo_plano(documento_id: str, nombre: str, paginas: list[str], categoria_final: str, entradas_indice: list[dict] | None = None, rango_paginas_indice: tuple[int, int] | None = None, subcategoria_final: str | None = None, contenido_pdf_bytes: bytes | None = None):
     """Corre DESPUÉS de que la petición HTTP ya respondió — el chunking,
     los embeddings y el chequeo de coherencia pasan aquí, sin bloquear al
     usuario. Cada fragmento guarda su página real de origen (capturada en
     la extracción, no adivinada después) y, si el documento tiene índice,
     también su sección — dirección completa dentro del documento."""
     try:
-        chunks = crear_chunks_con_paginas(paginas)
+        if contenido_pdf_bytes:
+            try:
+                paginas = await analizar_paginas_con_poco_texto(contenido_pdf_bytes, paginas)
+            except Exception as e:
+                logger.warning(f"[{nombre}] Falló el análisis visual de páginas ({e}) — se usa el marcador simple.")
+                paginas = marcar_paginas_vacias(paginas)
+        else:
+            paginas = marcar_paginas_vacias(paginas)
+        paginas_frontera = {e["pagina"] for e in entradas_indice} if entradas_indice else set()
+        chunks = crear_chunks_con_paginas(paginas, paginas_frontera=paginas_frontera)
         texto_completo = "\n\n".join(paginas)
 
         # AUTOCHEQUEO: convierte en código automático lo que hicimos a
