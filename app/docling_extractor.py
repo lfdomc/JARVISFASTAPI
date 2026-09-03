@@ -36,7 +36,9 @@ TIMEOUT_SEGUNDOS = 600  # antes 180 — ahora que la extracción corre en segund
 # plano (ya no bloquea la petición HTTP del usuario), tiene sentido darle a
 # Docling más margen para terminar documentos grandes en vez de rendirse
 # rápido y caer a pypdf de forma innecesaria.
-MODELO_DESCRIPCION_IMAGENES = "gemini-2.5-flash"
+MODELO_DESCRIPCION_IMAGENES = "gemini-3.6-flash"  # gemini-2.5-flash quedó
+# descontinuado — confirmado hoy con el error real de la API: "This model
+# models/gemini-2.5-flash is no longer available to new users."
 PROMPT_DESCRIPCION_IMAGENES = (
     "Describe este gráfico o imagen en 2-3 oraciones, en español. Si es un "
     "gráfico de datos (barras, líneas, torta), menciona las cifras y "

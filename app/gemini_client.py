@@ -15,7 +15,8 @@ logger = logging.getLogger("gemini_client")
 
 MODELOS_GENERACION = [
     "gemini-3.1-flash-lite",
-    "gemini-2.5-flash",
+    "gemini-3.6-flash",  # antes gemini-2.5-flash — descontinuado, confirmado
+    # hoy con el error real de la API (ver docling_extractor.py)
     "gemini-3.5-flash",
     "gemini-3.7-flash",
 ]

@@ -9,7 +9,7 @@ from pypdf import PdfReader
 
 from app.config import settings
 from app.chunking import crear_chunks_markdown, crear_chunks_con_paginas, marcar_paginas_vacias
-from app.indice_extractor import extraer_indice_documento, encontrar_seccion_para_pagina, clasificar_tipo_documento
+from app.indice_extractor import extraer_indice_documento, encontrar_seccion_para_pagina, clasificar_tipo_documento, _construir_markdown
 from app.calidad_ingesta import auditar_calidad_ingesta, resumen_legible, validar_indice_contra_chunks, resumen_legible_validacion_indice
 from app.docling_extractor import extraer_paginas_con_docling
 from app.analisis_visual import analizar_paginas_con_poco_texto
@@ -437,17 +437,27 @@ async def _extraer_e_indexar_pdf_en_segundo_plano(documento_id: str, nombre: str
                 return
 
         resultado_indice = extraer_indice_documento(paginas)
-        indice_markdown = resultado_indice["markdown"] if resultado_indice else None
         if resultado_indice:
+            indice_markdown = resultado_indice["markdown"]
             logger.info(f"[{nombre}] Índice detectado (págs. {resultado_indice['pagina_encontrado']}-{resultado_indice['pagina_fin_indice']}, {len(resultado_indice['entradas'])} entradas) — tipo probable: {resultado_indice['tipo_documento_probable']}")
         elif encabezados_docling:
+            # Mismo bug que ya se había corregido antes en el flujo viejo,
+            # colado de nuevo al escribir esta función nueva: indice_markdown
+            # se calculaba ANTES de esta rama, así que se quedaba en None
+            # aunque sí hubiera encabezados reales de Docling disponibles
+            # — el campo "tiene_indice" salía falso en el dashboard aunque
+            # la sección de cada fragmento sí se hubiera poblado bien por
+            # dentro.
             resultado_indice = {
                 "entradas": encabezados_docling,
                 "tipo_documento_probable": clasificar_tipo_documento(encabezados_docling),
                 "pagina_encontrado": None,
                 "pagina_fin_indice": None,
             }
+            indice_markdown = _construir_markdown(encabezados_docling)
             logger.info(f"[{nombre}] Sin índice impreso — usando {len(encabezados_docling)} encabezados detectados por Docling en la estructura del documento.")
+        else:
+            indice_markdown = None
 
         # Actualiza el registro placeholder con el contenido e índice reales
         await _actualizar_estado_documento(

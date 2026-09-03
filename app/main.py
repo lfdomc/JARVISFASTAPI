@@ -235,7 +235,7 @@ def _normalizar_para_cache(texto: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[¿?¡!.,;:\"'()\[\]{}]", "", texto.lower())).strip()
 
 
-VERSION_BACKEND = "2026-09-03-sin-subidas-duplicadas"  # cámbialo cada vez que quieras confirmar un despliegue específico
+VERSION_BACKEND = "2026-09-03-indice-markdown-corregido"  # cámbialo cada vez que quieras confirmar un despliegue específico
 
 
 @app.get("/")
