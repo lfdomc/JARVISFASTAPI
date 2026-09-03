@@ -170,3 +170,36 @@ class TestCorreccionDePaginasIndice:
         entradas = [{"nivel": 1, "numero": "1", "titulo": "A", "pagina": 5}]
         corregidas = corregir_paginas_indice(entradas, ["A"] * 10)
         assert corregidas[0]["pagina"] == 5  # no se toca, título muy corto
+
+
+class TestFormatoMarkdownDeDocling:
+    """Docling exporta el índice como Markdown, no como texto plano de
+    pypdf — estos casos confirman que los mismos patrones de siempre lo
+    reconocen, sin necesitar una segunda extracción de respaldo."""
+
+    def test_fila_de_tabla_markdown(self):
+        entradas = _parsear_entradas("| 5.5.4 Encadenamientos productivos | 128 |")
+        assert len(entradas) == 1
+        assert entradas[0]["numero"] == "5.5.4"
+        assert entradas[0]["pagina"] == 128
+
+    def test_separador_de_tabla_se_descarta(self):
+        assert _parsear_entradas("|---|---|") == []
+
+    def test_encabezado_markdown_se_reconoce(self):
+        entradas = _parsear_entradas("## 5.5.4 Encadenamientos productivos. 128")
+        assert len(entradas) == 1
+        assert entradas[0]["pagina"] == 128
+
+    def test_anexo_en_tabla_markdown(self):
+        """El caso real que motivó este arreglo: Anexo 2 en formato tabla."""
+        entradas = _parsear_entradas("| ANEXO 2 | 149 |")
+        assert len(entradas) == 1
+        assert entradas[0]["titulo"] == "ANEXO 2"
+        assert entradas[0]["pagina"] == 149
+
+    def test_texto_plano_de_pypdf_sigue_funcionando(self):
+        """Prueba de regresión — el formato de siempre no debe romperse."""
+        entradas = _parsear_entradas("5.5.4 Encadenamientos productivos.        128")
+        assert len(entradas) == 1
+        assert entradas[0]["pagina"] == 128

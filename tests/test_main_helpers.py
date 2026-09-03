@@ -149,3 +149,40 @@ class TestFiltroAltaConfianza:
         resultado = _filtrar_por_alta_confianza(fragmentos)
         assert len(resultado) < len(fragmentos)
         assert resultado[0]["similitud_coseno"] == 0.97
+
+
+class TestMencionDeSeccionConNumeroSimple:
+    """El bug real de hoy: 'anexo 1'/'anexo 2' (un solo dígito) nunca
+    activaban la búsqueda directa por sección — el filtro de longitud
+    mínima bloqueaba TODO número corto por igual, incluso cuando se
+    busca con la frase completa (no ambigua). Esto hacía que el sistema
+    dependiera solo de búsqueda semántica, que a veces confundía
+    'Anexo 2' con contenido de otra sección."""
+
+    def _calcular_termino(self, texto):
+        import re
+        patron = re.compile(r"\b(secci[oó]n|cap[ií]tulo|eje(?:\s+estrat[ée]gico)?|anexo|art[ií]culo|t[ií]tulo|apartado|cl[aá]usula|inciso)\s+(\d+(?:\.\d+){0,3}|[IVXLCDM]+)\b", re.IGNORECASE)
+        m = patron.search(texto)
+        if not m:
+            return None
+        numero = m.group(2)
+        con_punto = "." in numero
+        if con_punto and len(numero) < 2:
+            return None
+        return numero if con_punto else f"{m.group(1)} {numero}"
+
+    def test_anexo_con_un_solo_digito_no_se_bloquea(self):
+        assert self._calcular_termino("en que pagina esta el anexo 2") == "anexo 2"
+        assert self._calcular_termino("en que pagina esta el anexo 1") == "anexo 1"
+
+    def test_seccion_con_punto_sigue_buscandose_sola(self):
+        """No debe romperse el caso que ya funcionaba bien: la columna
+        seccion guarda '3.5 Empleo turístico', SIN la palabra 'sección'
+        — buscar la frase completa ahí no encontraría nada."""
+        assert self._calcular_termino("explícame la sección 3.5") == "3.5"
+
+    def test_numero_romano_de_un_caracter_ya_no_se_bloquea(self):
+        """Antes se bloqueaba por longitud — ahora se busca como frase
+        completa ('capítulo I'), que no es ambigua aunque el número en
+        sí tenga un solo carácter."""
+        assert self._calcular_termino("¿qué dice el capítulo I?") == "capítulo I"

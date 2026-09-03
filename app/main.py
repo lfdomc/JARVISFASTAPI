@@ -226,7 +226,7 @@ PATRON_MODO_PROFUNDO = re.compile(
 )
 PATRON_LINK = re.compile(r"^(guardar el link|guarda el link|guardar link|guarda link)\s*:", re.IGNORECASE)
 PATRON_URL = re.compile(r"https?://\S+", re.IGNORECASE)
-PATRON_MENCION_SECCION = re.compile(r"\b(?:secci[oó]n|cap[ií]tulo|eje(?:\s+estrat[ée]gico)?|anexo|art[ií]culo|t[ií]tulo|apartado|cl[aá]usula|inciso)\s+(\d+(?:\.\d+){0,3}|[IVXLCDM]+)\b", re.IGNORECASE)
+PATRON_MENCION_SECCION = re.compile(r"\b(secci[oó]n|cap[ií]tulo|eje(?:\s+estrat[ée]gico)?|anexo|art[ií]culo|t[ií]tulo|apartado|cl[aá]usula|inciso)\s+(\d+(?:\.\d+){0,3}|[IVXLCDM]+)\b", re.IGNORECASE)
 PATRON_MENCION_PAGINA = re.compile(r"\bp[aá]g(?:s|ina[s]?)?\.?\s+(\d+)\b", re.IGNORECASE)
 FRASES_GUARDADO_SIN_COMANDO = ["mi profesión es", "guarda esto", "recuerda que", "anota que"]
 
@@ -235,7 +235,7 @@ def _normalizar_para_cache(texto: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[¿?¡!.,;:\"'()\[\]{}]", "", texto.lower())).strip()
 
 
-VERSION_BACKEND = "2026-09-03-docling-sin-descripcion-imagen"  # cámbialo cada vez que quieras confirmar un despliegue específico
+VERSION_BACKEND = "2026-09-03-pypdf-prioridad-para-indice"  # cámbialo cada vez que quieras confirmar un despliegue específico
 
 
 @app.get("/")
@@ -395,19 +395,35 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
         # queda al final del fragmento ANTERIOR al contenido real, y la
         # búsqueda semántica puede no encontrarlo entre pocos candidatos.
         mencion_seccion = PATRON_MENCION_SECCION.search(texto_usuario)
-        # Con números romanos cortos (ej. "I", "V") una búsqueda ILIKE
-        # sería demasiado ambigua — coincidiría con texto normal en
-        # cualquier parte del documento. Solo se usa la búsqueda directa
-        # si el número tiene al menos 2 caracteres (ej. "II", "3.5").
-        if mencion_seccion and len(mencion_seccion.group(1)) >= 2:
-            fragmentos_por_seccion = await supabase_client.buscar_por_numero_seccion(
-                mencion_seccion.group(1), telegram_id_solicitante=telegram_id,
-            )
-            if fragmentos_por_seccion:
-                ids_ya_presentes = {f["id"] for f in contexto_fragmentos}
-                nuevos = [f for f in fragmentos_por_seccion if f["id"] not in ids_ya_presentes]
-                contexto_fragmentos = nuevos + contexto_fragmentos
-                logger.info(f"[BÚSQUEDA POR SECCIÓN] '{mencion_seccion.group(1)}' agregó {len(nuevos)} fragmento(s) directos.")
+        # El filtro de "al menos 2 caracteres" existía para evitar
+        # búsquedas por número SUELTO demasiado cortas/ambiguas (ej. "I"
+        # sola). Pero ahora que los números SIN punto se buscan con la
+        # FRASE COMPLETA (ver abajo — "anexo 2", no solo "2"), esa
+        # ambigüedad ya no aplica ahí: "anexo 2" es específico aunque el
+        # número tenga un solo dígito. El filtro de longitud mínima
+        # ahora solo protege el camino de número SUELTO (con punto, ej.
+        # "3.5"), que es el único que de verdad puede quedar corto.
+        #
+        # BUG REAL encontrado hoy: con el filtro aplicado a TODOS los
+        # casos por igual, "anexo 1"/"anexo 2" (un solo dígito) nunca
+        # activaban la búsqueda directa — el sistema dependía solo de
+        # la búsqueda semántica, que a veces encontraba el fragmento
+        # equivocado (confirmado: "Anexo 2" devolvía contenido de la
+        # "Introducción" por error).
+        if mencion_seccion:
+            numero = mencion_seccion.group(2)
+            con_punto = "." in numero
+            suficientemente_especifico = len(numero) >= 2 if con_punto else True
+            if suficientemente_especifico:
+                termino_busqueda = numero if con_punto else f"{mencion_seccion.group(1)} {numero}"
+                fragmentos_por_seccion = await supabase_client.buscar_por_numero_seccion(
+                    termino_busqueda, telegram_id_solicitante=telegram_id,
+                )
+                if fragmentos_por_seccion:
+                    ids_ya_presentes = {f["id"] for f in contexto_fragmentos}
+                    nuevos = [f for f in fragmentos_por_seccion if f["id"] not in ids_ya_presentes]
+                    contexto_fragmentos = nuevos + contexto_fragmentos
+                    logger.info(f"[BÚSQUEDA POR SECCIÓN] '{termino_busqueda}' agregó {len(nuevos)} fragmento(s) directos.")
 
         # Igual, pero para menciones directas de número de página
         # (ej. "¿qué dice la página 50?") — mismo principio, columna

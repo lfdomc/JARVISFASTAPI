@@ -436,7 +436,38 @@ async def _extraer_e_indexar_pdf_en_segundo_plano(documento_id: str, nombre: str
                 )
                 return
 
-        resultado_indice = extraer_indice_documento(paginas)
+        # PRIORIDAD: pypdf primero para el índice, sin importar qué motor
+        # se usó para extraer el resto del documento. No es solo un
+        # respaldo — es la decisión correcta según la evidencia de hoy:
+        # cada vez que confirmamos algo del índice con datos reales
+        # (Meta 4a, Anexo 1/Anexo 2, la autocorrección de página), fue
+        # siempre con el texto de pypdf. El formato Markdown de Docling
+        # para el índice nunca se confirmó con evidencia real — solo se
+        # normalizó a partir de suposiciones razonables. pypdf es
+        # predecible; Docling, para esto puntual, sigue siendo una
+        # variable sin confirmar. Si el motor principal YA fue pypdf, no
+        # hace falta repetir el trabajo.
+        if motor_extraccion == "docling":
+            try:
+                paginas_pypdf_para_indice = _extraer_texto_pdf(contenido_bytes)
+                resultado_indice = extraer_indice_documento(paginas_pypdf_para_indice)
+                if resultado_indice:
+                    logger.info(f"[{nombre}] Índice detectado con pypdf (prioridad, más confiable que el Markdown de Docling para esto).")
+            except Exception as e:
+                resultado_indice = None
+                logger.warning(f"[{nombre}] Falló la extracción de índice con pypdf ({e}) — se intenta con el texto de Docling.")
+        else:
+            resultado_indice = None
+
+        # Si pypdf no encontró nada (documento sin índice impreso, o el
+        # PDF le resultó ilegible a pypdf específicamente), se intenta
+        # con el texto que ya se tiene (Docling o pypdf, según cuál se
+        # haya usado) — la normalización de Markdown en indice_extractor.py
+        # ya sabe reconocer tablas/encabezados de Docling si llegan a
+        # aparecer ahí.
+        if not resultado_indice:
+            resultado_indice = extraer_indice_documento(paginas)
+
         if resultado_indice:
             indice_markdown = resultado_indice["markdown"]
             logger.info(f"[{nombre}] Índice detectado (págs. {resultado_indice['pagina_encontrado']}-{resultado_indice['pagina_fin_indice']}, {len(resultado_indice['entradas'])} entradas) — tipo probable: {resultado_indice['tipo_documento_probable']}")

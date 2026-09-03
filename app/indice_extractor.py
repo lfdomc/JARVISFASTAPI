@@ -156,10 +156,39 @@ def extraer_indice_documento(paginas: list[str]) -> dict | None:
     return None
 
 
+def _normalizar_linea_indice(linea: str) -> str:
+    """
+    Normaliza variaciones de formato que pueden venir de Docling (que
+    exporta el índice como Markdown, no como texto plano de pypdf) —
+    para que los mismos patrones de siempre puedan reconocerlas, sin
+    necesitar una segunda extracción con pypdf como respaldo.
+
+    Casos que cubre:
+    - Separador de tabla Markdown ("|---|---|") -> se descarta (línea vacía)
+    - Fila de tabla Markdown ("| 5.5.4 Título | 128 |") -> "5.5.4 Título 128"
+    - Encabezado Markdown ("## 5.5.4 Título. 128") -> "5.5.4 Título. 128"
+    """
+    linea = linea.strip()
+
+    # Separador de tabla Markdown — no aporta contenido, se descarta
+    if re.match(r'^\|?[\s\-:|]+\|?$', linea) and "|" in linea:
+        return ""
+
+    # Fila de tabla Markdown: quita los "|" y junta las celdas con espacio
+    if linea.startswith("|") and linea.endswith("|") and linea.count("|") >= 2:
+        celdas = [c.strip() for c in linea.strip("|").split("|")]
+        linea = " ".join(c for c in celdas if c)
+
+    # Encabezado Markdown al inicio de línea ("## ", "### ", etc.)
+    linea = re.sub(r'^#{1,6}\s*', '', linea)
+
+    return linea.strip()
+
+
 def _parsear_entradas(texto_pagina: str) -> list[dict]:
     entradas = []
     for linea in texto_pagina.split("\n"):
-        linea = linea.strip()
+        linea = _normalizar_linea_indice(linea)
         if not linea:
             continue
 
