@@ -66,12 +66,27 @@ async def listar_categorias_existentes():
         return categorias
 
 
+@router.get("/subcategories")
+async def listar_subcategorias_existentes():
+    """Subcategorías que ya existen, para autocompletar — mismo principio
+    que las categorías."""
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        resp = await client.get(
+            f"{_base()}/rest/v1/fragmentos_vectoriales_gdp?select=subcategoria&limit=5000",
+            headers=_headers()
+        )
+        if resp.status_code != 200:
+            return []
+        subcategorias = sorted(set(f["subcategoria"] for f in resp.json() if f.get("subcategoria")))
+        return subcategorias
+
+
 @router.get("")
 async def listar_documentos():
     """Lista documentos activos y en proceso, con su conteo de fragmentos."""
     url = (
         f"{_base()}/rest/v1/documentos_gdp"
-        f"?estado=in.(ACTIVE,PROCESSING,FAILED)&select=id,nombre_archivo,categoria,mime_type,creado_en,estado"
+        f"?estado=in.(ACTIVE,PROCESSING,FAILED)&select=id,nombre_archivo,categoria,subcategoria,mime_type,creado_en,estado"
         f"&order=creado_en.desc"
     )
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -138,7 +153,7 @@ async def listar_documentos_archivados():
     """Lista los documentos archivados (borrado suave), para poder revisarlos y restaurarlos."""
     url = (
         f"{_base()}/rest/v1/documentos_gdp"
-        f"?estado=eq.ARCHIVED&select=id,nombre_archivo,categoria,mime_type,creado_en"
+        f"?estado=eq.ARCHIVED&select=id,nombre_archivo,categoria,subcategoria,mime_type,creado_en"
         f"&order=creado_en.desc"
     )
     async with httpx.AsyncClient(timeout=20.0) as client:
@@ -161,7 +176,7 @@ async def restaurar_documento(documento_id: uuid.UUID):
     return {"ok": True, "restaurado": documento_id}
 
 
-async def _crear_documento_maestro(nombre_archivo: str, contenido_markdown: str, categoria: str, mime_type: str, estado: str = "ACTIVE", indice_markdown: str | None = None) -> str | None:
+async def _crear_documento_maestro(nombre_archivo: str, contenido_markdown: str, categoria: str, mime_type: str, estado: str = "ACTIVE", indice_markdown: str | None = None, subcategoria: str | None = None) -> str | None:
     import hashlib
     import uuid
     hash_sha256 = hashlib.sha256(contenido_markdown.encode("utf-8")).hexdigest()
@@ -172,6 +187,7 @@ async def _crear_documento_maestro(nombre_archivo: str, contenido_markdown: str,
         "id": documento_uuid,
         "documento_raiz_id": documento_uuid,
         "categoria": categoria,
+        "subcategoria": subcategoria,
         "estandar_interop": "INTERNAL",
         "pii_sensitivity_level": "S1",
         "pii_lifecycle_state": "ACTIVE",
@@ -200,11 +216,12 @@ async def _crear_documento_maestro(nombre_archivo: str, contenido_markdown: str,
     return None
 
 
-async def _guardar_fragmento(texto: str, categoria: str, embedding: list, documento_id: str, metadata: dict, pagina_inicio: int | None = None, pagina_fin: int | None = None, seccion: str | None = None, tipo_contenido: str | None = None, idioma: str | None = None) -> bool:
+async def _guardar_fragmento(texto: str, categoria: str, embedding: list, documento_id: str, metadata: dict, pagina_inicio: int | None = None, pagina_fin: int | None = None, seccion: str | None = None, tipo_contenido: str | None = None, idioma: str | None = None, subcategoria: str | None = None) -> bool:
     url = f"{_base()}/rest/v1/fragmentos_vectoriales_gdp"
     payload = [{
         "documento_id": documento_id,
         "categoria": categoria,
+        "subcategoria": subcategoria,
         "contenido_chunk": texto,
         "embedding": embedding,
         "metadata": metadata,
@@ -233,6 +250,7 @@ async def subir_documento(
     background_tasks: BackgroundTasks,
     archivo: UploadFile = File(...),
     categoria: str = Form(...),
+    subcategoria: str | None = Form(None),
 ):
     """
     Acepta .pdf, .md o .txt. Extrae el texto rápido (síncrono, es solo
@@ -250,7 +268,22 @@ async def subir_documento(
        el documento no encaja con lo que ya existe en esa categoría.
     """
     nombre = archivo.filename or "documento_sin_nombre"
-    categoria_final = categoria.strip().upper()
+    # Subcategoría: se puede mandar explícita (campo separado) o con la
+    # convención de "/" dentro de la categoría misma (ej. "MANUALES/NOBILIS")
+    # — siempre se separa primero por "/" (para que la categoría nunca se
+    # quede con el "/" incluido), y el campo explícito, si viene, tiene
+    # prioridad sobre lo que traiga la barra. Con "/" en la categoría, el
+    # filtro de búsqueda por categoría (que ya usa coincidencia parcial)
+    # sigue funcionando igual sin tocar la función de búsqueda.
+    categoria_input = categoria.strip()
+    subcategoria_de_barra = None
+    if "/" in categoria_input:
+        categoria_input, subcategoria_de_barra = categoria_input.split("/", 1)
+        subcategoria_de_barra = subcategoria_de_barra.strip().upper() or None
+
+    subcategoria_explicita = subcategoria.strip().upper() if subcategoria and subcategoria.strip() else None
+    subcategoria_final = subcategoria_explicita or subcategoria_de_barra
+    categoria_final = categoria_input.strip().upper()
     contenido_bytes = await archivo.read()
 
     if nombre.lower().endswith(".pdf"):
@@ -328,7 +361,7 @@ async def subir_documento(
     # Se crea de inmediato en estado PROCESSING — visible en el dashboard
     # como "procesando", pero invisible para las búsquedas (busqueda_hibrida_rrf
     # solo considera documentos ACTIVE) hasta que termine.
-    documento_id = await _crear_documento_maestro(nombre, texto, categoria_final, mime_type, estado="PROCESSING", indice_markdown=indice_markdown)
+    documento_id = await _crear_documento_maestro(nombre, texto, categoria_final, mime_type, estado="PROCESSING", indice_markdown=indice_markdown, subcategoria=subcategoria_final)
     if not documento_id:
         raise HTTPException(status_code=502, detail="No se pudo crear el documento maestro en Supabase")
 
@@ -340,6 +373,7 @@ async def subir_documento(
         _procesar_documento_en_segundo_plano, documento_id, nombre, paginas, categoria_final,
         resultado_indice["entradas"] if resultado_indice else None,
         rango_paginas_indice,
+        subcategoria_final,
     )
 
     return {
@@ -350,6 +384,7 @@ async def subir_documento(
         "indice_detectado": bool(resultado_indice),
         "tipo_documento_probable": resultado_indice.get("tipo_documento_probable") if resultado_indice else None,
         "motor_extraccion": motor_extraccion,
+        "subcategoria": subcategoria_final,
         "mensaje": "El documento se está procesando en segundo plano. Actualiza la lista en unos momentos para ver el progreso.",
     }
 
@@ -366,7 +401,7 @@ async def _actualizar_estado_documento(documento_id: str, estado: str, datos_ext
         )
 
 
-async def _procesar_documento_en_segundo_plano(documento_id: str, nombre: str, paginas: list[str], categoria_final: str, entradas_indice: list[dict] | None = None, rango_paginas_indice: tuple[int, int] | None = None):
+async def _procesar_documento_en_segundo_plano(documento_id: str, nombre: str, paginas: list[str], categoria_final: str, entradas_indice: list[dict] | None = None, rango_paginas_indice: tuple[int, int] | None = None, subcategoria_final: str | None = None):
     """Corre DESPUÉS de que la petición HTTP ya respondió — el chunking,
     los embeddings y el chequeo de coherencia pasan aquí, sin bloquear al
     usuario. Cada fragmento guarda su página real de origen (capturada en
@@ -476,6 +511,7 @@ async def _procesar_documento_en_segundo_plano(documento_id: str, nombre: str, p
                 chunk["texto"], categoria_final, embedding, documento_id, metadata,
                 pagina_inicio=chunk["pagina_inicio"], pagina_fin=chunk["pagina_fin"], seccion=seccion,
                 tipo_contenido=chunk.get("tipo_contenido"), idioma=chunk.get("idioma"),
+                subcategoria=subcategoria_final,
             )
             if exito:
                 guardados += 1

@@ -61,6 +61,32 @@ class TestFormatoPalabraPrimero:
         assert len(entradas) == 5
 
 
+class TestFormatoPalabraPrimeroIngles:
+    """Respaldo para cuando Docling cae a pypdf y el documento no está
+    en español."""
+
+    def test_documento_legal_ingles(self):
+        texto = "\n".join([
+            "Article 1. Scope and purpose. 5",
+            "Article 2. Definitions. 7",
+            "Chapter 2. Procedure. 10",
+        ])
+        entradas = _parsear_entradas(texto)
+        assert len(entradas) == 3
+        assert entradas[0]["numero"] == "Article 1"
+
+    def test_appendix_ingles(self):
+        entradas = _parsear_entradas("Appendix 1 45")
+        assert len(entradas) == 1
+        assert entradas[0]["pagina"] == 45
+
+    def test_clasificacion_legal_en_ingles(self):
+        entradas = _parsear_entradas("\n".join([
+            "Article 1. Scope. 5", "Article 2. Definitions. 7", "Article 3. Requirements. 10",
+        ]))
+        assert clasificar_tipo_documento(entradas) == "legal_normativo"
+
+
 class TestClasificacionTipoDocumento:
     def test_documento_legal_se_clasifica_como_legal(self):
         entradas = _parsear_entradas("\n".join([

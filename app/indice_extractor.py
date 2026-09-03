@@ -17,15 +17,21 @@ PATRON_ENTRADA = re.compile(r'^\s*(\d+(?:\.\d+){0,3})\.?\s*(.+?)[\s\.]{1,}(\d{1,
 # revés del formato "número primero" de planes/manuales ("5.5.4
 # Encadenamientos... 128"). Soporta número romano o decimal después de
 # la palabra, y también sirve para "Sección", "Apartado", "Cláusula",
-# "Inciso" — términos comunes en distintos tipos de documento.
+# "Inciso" — términos comunes en distintos tipos de documento. Incluye
+# también los equivalentes en inglés (Article, Chapter, Title, Section,
+# Appendix, Clause, Item, Paragraph) — respaldo para cuando Docling cae
+# a pypdf y el documento no está en español (con Docling funcionando
+# completo, la detección de encabezados por estructura ya cubre esto
+# sin depender del idioma).
 PATRON_ENTRADA_PALABRA_PRIMERO = re.compile(
-    r'^\s*(t[ií]tulo|art[ií]culo|cap[ií]tulo|secci[oó]n|apartado|cl[aá]usula|inciso|anexo)\s+'
+    r'^\s*(t[ií]tulo|art[ií]culo|cap[ií]tulo|secci[oó]n|apartado|cl[aá]usula|inciso|anexo|'
+    r'title|article|chapter|section|appendix|clause|item|paragraph)\s+'
     r'([IVXLCDM]+|\d+(?:\.\d+)*)\.?\s*(.+?)[\s\.]{1,}(\d{1,4})\s*$',
     re.IGNORECASE
 )
-PATRON_ANEXO = re.compile(r'^\s*(anexo\s*\d+|ap[eé]ndice\s*\d+)\s+(\d{1,4})\s*$', re.IGNORECASE)
+PATRON_ANEXO = re.compile(r'^\s*(anexo\s*\d+|ap[eé]ndice\s*\d+|appendix\s*\d+)\s+(\d{1,4})\s*$', re.IGNORECASE)
 PATRON_ENCABEZADO_INDICE = re.compile(
-    r'^\s*(contenido|[ií]ndice|tabla de contenido[s]?|table of contents)\s*$', re.IGNORECASE
+    r'^\s*(contenido|[ií]ndice|tabla de contenido[s]?|table of contents|contents)\s*$', re.IGNORECASE
 )
 
 MIN_ENTRADAS_PARA_CONSIDERARLO_INDICE = 6
@@ -143,8 +149,8 @@ def _parsear_entradas(texto_pagina: str) -> list[dict]:
 # solo una pista útil: "Artículo/Cláusula/Inciso" son casi siempre
 # normativos/legales; "Eje/Capítulo/numeración decimal" son más comunes
 # en planes, manuales y documentos técnicos.
-PALABRAS_TIPO_LEGAL = {"artículo", "cláusula", "inciso", "título"}
-PALABRAS_TIPO_TECNICO = {"eje", "capítulo", "sección", "apartado", "anexo"}
+PALABRAS_TIPO_LEGAL = {"artículo", "cláusula", "inciso", "título", "article", "clause", "item", "title"}
+PALABRAS_TIPO_TECNICO = {"eje", "capítulo", "sección", "apartado", "anexo", "chapter", "section", "appendix", "paragraph"}
 
 
 def clasificar_tipo_documento(entradas: list[dict]) -> str | None:
