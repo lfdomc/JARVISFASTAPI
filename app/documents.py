@@ -284,14 +284,57 @@ async def subir_documento(
     contenido_bytes = await archivo.read()
 
     if nombre.lower().endswith(".pdf"):
-        # Registro placeholder inmediato — el contenido real, el índice
-        # y el chequeo de duplicados se resuelven en segundo plano, una
-        # vez que la extracción (que puede tardar) haya terminado.
+        # Chequeo de duplicados INMEDIATO por los bytes crudos del
+        # archivo (sin esperar a la extracción, que puede tardar
+        # minutos) — cierra la ventana de carrera donde subir el mismo
+        # archivo dos veces seguidas (doble clic, reintento del
+        # navegador) creaba dos documentos porque ninguno alcanzaba a
+        # ver al otro como duplicado a tiempo.
+        hash_bytes = hashlib.sha256(contenido_bytes).hexdigest()
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            dup_resp = await client.get(
+                f"{_base()}/rest/v1/documentos_gdp?hash_bytes_original=eq.{hash_bytes}&estado=in.(ACTIVE,PROCESSING)&select=id,nombre_archivo",
+                headers=_headers()
+            )
+            if dup_resp.status_code == 200 and dup_resp.json():
+                existente = dup_resp.json()[0]
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Este archivo ya se está subiendo o ya está indexado como \"{existente['nombre_archivo']}\"."
+                )
+
+        # Registro placeholder inmediato — el contenido real y el índice
+        # se resuelven en segundo plano, una vez que la extracción (que
+        # puede tardar) haya terminado. El chequeo de duplicados por
+        # CONTENIDO EXTRAÍDO (más preciso, detecta el mismo texto en un
+        # PDF re-exportado distinto) sigue corriendo después, como
+        # respaldo — ver _extraer_e_indexar_pdf_en_segundo_plano.
         documento_id = await _crear_documento_maestro(
-            nombre, "", categoria_final, "application/pdf", estado="PROCESSING", subcategoria=subcategoria_final
+            nombre, "", categoria_final, "application/pdf", estado="PROCESSING", subcategoria=subcategoria_final,
         )
         if not documento_id:
             raise HTTPException(status_code=502, detail="No se pudo crear el documento maestro en Supabase")
+
+        await _actualizar_estado_documento(documento_id, "PROCESSING", datos_extra={"hash_bytes_original": hash_bytes})
+        # PostgREST no distingue "0 filas afectadas por conflicto" de
+        # "0 filas afectadas porque no existía" en la respuesta del
+        # PATCH — así que se confirma aparte, con una lectura directa,
+        # si el hash quedó guardado en ESTE documento específico. Si no
+        # (la restricción única de la base lo rechazó porque otra
+        # petición casi simultánea ya lo reclamó), se marca este
+        # registro como duplicado y se avisa al usuario.
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            verifica_resp = await client.get(
+                f"{_base()}/rest/v1/documentos_gdp?id=eq.{documento_id}&select=hash_bytes_original",
+                headers=_headers()
+            )
+        hash_guardado = verifica_resp.json()[0].get("hash_bytes_original") if verifica_resp.status_code == 200 and verifica_resp.json() else None
+        if hash_guardado != hash_bytes:
+            await _actualizar_estado_documento(documento_id, "FAILED")
+            raise HTTPException(
+                status_code=409,
+                detail="Este archivo se subió casi al mismo tiempo desde otra petición — se descartó este duplicado."
+            )
 
         background_tasks.add_task(
             _extraer_e_indexar_pdf_en_segundo_plano, documento_id, nombre, contenido_bytes, categoria_final, subcategoria_final,
@@ -426,16 +469,17 @@ async def _extraer_e_indexar_pdf_en_segundo_plano(documento_id: str, nombre: str
         await logging_utils.registrar_error("SUBIDA_DOCUMENTO", f"Excepción extrayendo el PDF en segundo plano: {e}", nombre)
 
 
-async def _actualizar_estado_documento(documento_id: str, estado: str, datos_extra: dict | None = None):
+async def _actualizar_estado_documento(documento_id: str, estado: str, datos_extra: dict | None = None) -> bool:
     payload = {"estado": estado}
     if datos_extra:
         payload.update(datos_extra)
     async with httpx.AsyncClient(timeout=15.0) as client:
-        await client.patch(
+        resp = await client.patch(
             f"{_base()}/rest/v1/documentos_gdp?id=eq.{documento_id}",
             json=payload,
             headers=_headers({"Prefer": "return=minimal"})
         )
+        return resp.status_code in (200, 204)
 
 
 async def _procesar_documento_en_segundo_plano(documento_id: str, nombre: str, paginas: list[str], categoria_final: str, entradas_indice: list[dict] | None = None, rango_paginas_indice: tuple[int, int] | None = None, subcategoria_final: str | None = None, contenido_pdf_bytes: bytes | None = None):
