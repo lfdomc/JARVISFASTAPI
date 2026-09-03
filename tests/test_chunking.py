@@ -202,6 +202,20 @@ class TestClasificacionTipoContenido:
         from app.chunking import _clasificar_tipo_contenido
         assert _clasificar_tipo_contenido("# 5.5.4 Encadenamientos productivos") == "titulo"
 
+    def test_descripcion_de_imagen_se_reconoce(self):
+        """Caso real confirmado hoy: el análisis visual SÍ generó
+        descripciones reales — deben distinguirse de una página
+        genuinamente vacía, porque aquí sí hay contenido real y
+        buscable."""
+        from app.chunking import _clasificar_tipo_contenido
+        texto = '[Contenido visual de la página 1: Esta imagen es la portada del "Plan Nacional de Turismo".]'
+        assert _clasificar_tipo_contenido(texto) == "descripcion_imagen"
+
+    def test_pagina_en_blanco_confirmada_se_reconoce(self):
+        from app.chunking import _clasificar_tipo_contenido
+        texto = "[Página 3: en blanco, sin contenido — confirmado por análisis visual.]"
+        assert _clasificar_tipo_contenido(texto) == "vacia_o_imagen"
+
     def test_chunks_incluyen_tipo_contenido(self):
         """El campo debe venir en cada fragmento que arma crear_chunks_con_paginas."""
         chunks = crear_chunks_con_paginas(["Texto de una página normal con suficiente contenido para pasar el mínimo."])

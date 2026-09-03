@@ -7,7 +7,7 @@ import sys
 import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.indice_extractor import _parsear_entradas, clasificar_tipo_documento
+from app.indice_extractor import _parsear_entradas, clasificar_tipo_documento, corregir_paginas_indice
 from app.calidad_ingesta import validar_indice_contra_chunks
 
 
@@ -134,3 +134,39 @@ class TestValidacionIndiceContraFragmentos:
         assert reporte["ok"] is False
         assert len(reporte["entradas_sin_cobertura"]) == 1
         assert reporte["entradas_sin_cobertura"][0]["pagina_esperada"] == 128
+
+
+class TestCorreccionDePaginasIndice:
+    """El caso real de hoy: el índice IMPRESO decía 'Anexo 2 → página
+    150', pero el contenido real de 'ANEXO 2' empieza en la página 149
+    — un error del documento original, no nuestro. Confiar ciegamente
+    en el número impreso propagaba ese error a nuestros propios cortes
+    de fragmento."""
+
+    def test_pagina_correcta_no_se_toca(self):
+        entradas = [{"nivel": 1, "numero": None, "titulo": "ANEXO 1", "pagina": 3}]
+        paginas = ["", "", "ANEXO 1: contenido real aquí mismo"]  # está exactamente en la 3
+        corregidas = corregir_paginas_indice(entradas, paginas)
+        assert corregidas[0]["pagina"] == 3
+
+    def test_pagina_incorrecta_se_corrige_con_la_real(self):
+        """El caso real: índice dice página 4, pero el título real está en la 3."""
+        entradas = [{"nivel": 1, "numero": None, "titulo": "ANEXO 2", "pagina": 4}]
+        paginas = ["", "", "ANEXO 2: contenido real que sí empieza aquí", "otra cosa en la 4"]
+        corregidas = corregir_paginas_indice(entradas, paginas)
+        assert corregidas[0]["pagina"] == 3  # corregido a donde está de verdad
+
+    def test_sin_coincidencia_cercana_no_se_toca(self):
+        """Si no se encuentra en ningún lado cercano, mejor no adivinar
+        — se deja el número original del índice tal cual."""
+        entradas = [{"nivel": 1, "numero": None, "titulo": "ANEXO 3", "pagina": 4}]
+        paginas = ["", "", "", "", "", "", "", "", "", ""]  # ANEXO 3 no aparece en ningún lado
+        corregidas = corregir_paginas_indice(entradas, paginas)
+        assert corregidas[0]["pagina"] == 4  # no se toca
+
+    def test_titulos_muy_cortos_se_ignoran(self):
+        """Títulos de menos de 4 caracteres no se usan para buscar —
+        demasiado ambiguos, alto riesgo de falso positivo."""
+        entradas = [{"nivel": 1, "numero": "1", "titulo": "A", "pagina": 5}]
+        corregidas = corregir_paginas_indice(entradas, ["A"] * 10)
+        assert corregidas[0]["pagina"] == 5  # no se toca, título muy corto

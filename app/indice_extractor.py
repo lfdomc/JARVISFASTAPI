@@ -36,6 +36,60 @@ PATRON_ENCABEZADO_INDICE = re.compile(
 
 MIN_ENTRADAS_PARA_CONSIDERARLO_INDICE = 6
 PAGINAS_MAX_A_REVISAR = 15  # el índice casi siempre está al principio
+VENTANA_CORRECCION_PAGINA = 3  # cuántas páginas alrededor de la reportada se revisan
+
+
+def corregir_paginas_indice(entradas: list[dict], paginas: list[str]) -> list[dict]:
+    """
+    El índice IMPRESO de un documento puede tener errores propios del
+    documento original — caso real encontrado hoy: el índice dice
+    "Anexo 2 → página 150", pero el contenido real de "ANEXO 2" empieza
+    en la página 149. Confiar ciegamente en el número impreso para
+    forzar cortes de fragmento (ver chunking.py, paginas_frontera)
+    propaga ese error del documento original a nuestros propios datos.
+
+    Aquí se verifica cada entrada contra el contenido REAL: si el
+    título no aparece literal en la página que dice el índice, se busca
+    en un rango pequeño de páginas cercanas (antes y después) y se
+    corrige si se encuentra ahí. Si no se encuentra en ningún lado
+    cercano, se deja el número original tal cual — mejor no corregir
+    que adivinar mal.
+    """
+    corregidas = []
+    for entrada in entradas:
+        pagina_declarada = entrada.get("pagina")
+        texto_buscar = (entrada.get("titulo") or "").strip()
+        if not pagina_declarada or not texto_buscar or len(texto_buscar) < 4:
+            corregidas.append(entrada)
+            continue
+
+        idx_declarada = pagina_declarada - 1  # a 0-indexado
+        ya_esta_bien = (
+            0 <= idx_declarada < len(paginas)
+            and texto_buscar.lower() in (paginas[idx_declarada] or "").lower()
+        )
+        if ya_esta_bien:
+            corregidas.append(entrada)
+            continue
+
+        pagina_corregida = None
+        for delta in range(1, VENTANA_CORRECCION_PAGINA + 1):
+            for candidata in (pagina_declarada - delta, pagina_declarada + delta):
+                idx = candidata - 1
+                if 0 <= idx < len(paginas) and texto_buscar.lower() in (paginas[idx] or "").lower():
+                    pagina_corregida = candidata
+                    break
+            if pagina_corregida:
+                break
+
+        if pagina_corregida and pagina_corregida != pagina_declarada:
+            nueva_entrada = dict(entrada)
+            nueva_entrada["pagina"] = pagina_corregida
+            corregidas.append(nueva_entrada)
+        else:
+            corregidas.append(entrada)
+
+    return corregidas
 
 
 def extraer_indice_documento(paginas: list[str]) -> dict | None:
@@ -90,6 +144,7 @@ def extraer_indice_documento(paginas: list[str]) -> dict | None:
             siguiente += 1
 
         if len(entradas) >= MIN_ENTRADAS_PARA_CONSIDERARLO_INDICE or (tiene_encabezado and len(entradas) >= 3):
+            entradas = corregir_paginas_indice(entradas, paginas)
             return {
                 "markdown": _construir_markdown(entradas),
                 "entradas": entradas,

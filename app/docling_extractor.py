@@ -55,6 +55,12 @@ def _configurar_pipeline_con_descripcion_imagenes():
     if claves:
         opciones.do_picture_description = True
         opciones.generate_picture_images = True  # necesario para tener la imagen que enviar
+        opciones.enable_remote_services = True  # Docling bloquea llamadas a servicios
+        # externos por seguridad a menos que se active explícitamente — sin esto,
+        # la conversión entera fallaba de inmediato (OperationNotAllowed) y caía
+        # al respaldo de pypdf, sin que ni siquiera el resto de Docling llegara
+        # a correr. Confirmado con el log real: "Connections to remote services
+        # is only allowed when set explicitly."
         opciones.picture_description_options = PictureDescriptionApiOptions(
             url="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
             headers={"Authorization": f"Bearer {claves[0]}"},

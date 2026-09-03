@@ -9,7 +9,8 @@ PATRON_MARCADOR = re.compile(r"\x00PAGINA:(\d+)\x00")
 PATRON_FILA_TABLA_MD = re.compile(r"^\s*\|.*\|\s*$")
 PATRON_GUION_CORTE = re.compile(r"(?<=\w)\s?-\s*$")
 PATRON_ENCABEZADO_MD = re.compile(r"^\s*#{1,6}\s")
-PATRON_MARCADOR_PAGINA_VACIA = re.compile(r"sin texto extraíble")
+PATRON_MARCADOR_PAGINA_VACIA = re.compile(r"sin texto extraíble|en blanco, sin contenido")
+PATRON_DESCRIPCION_IMAGEN = re.compile(r"Contenido visual de la página")
 
 
 def marcar_paginas_vacias(paginas: list[str]) -> list[str]:
@@ -48,14 +49,23 @@ def marcar_paginas_vacias(paginas: list[str]) -> list[str]:
 
 def _clasificar_tipo_contenido(texto: str) -> str:
     """
-    Clasifica un fragmento ya armado como 'tabla', 'titulo', 'vacia_o_imagen'
-    o 'texto' — funciona igual sin importar qué motor extrajo el texto
-    (Docling o pypdf), porque se basa en el patrón del texto final, no
-    en metadatos internos de ningún motor. Con Docling las tablas llegan
-    ya en formato de tabla Markdown real, así que esta detección es más
-    certera que antes (con pypdf puro, una tabla de PDF nunca llegaba a
-    verse como tabla Markdown en absoluto).
+    Clasifica un fragmento ya armado como 'tabla', 'titulo',
+    'vacia_o_imagen', 'descripcion_imagen' o 'texto' — funciona igual
+    sin importar qué motor extrajo el texto (Docling o pypdf), porque
+    se basa en el patrón del texto final, no en metadatos internos de
+    ningún motor. Con Docling las tablas llegan ya en formato de tabla
+    Markdown real, así que esta detección es más certera que antes (con
+    pypdf puro, una tabla de PDF nunca llegaba a verse como tabla
+    Markdown en absoluto).
+
+    'descripcion_imagen' es distinto de 'vacia_o_imagen': el primero es
+    una página donde SÍ se encontró algo visual y Gemini lo describió
+    (contenido real, buscable); el segundo es una página genuinamente
+    en blanco, sin nada que describir.
     """
+    if PATRON_DESCRIPCION_IMAGEN.search(texto):
+        return "descripcion_imagen"
+
     if PATRON_MARCADOR_PAGINA_VACIA.search(texto) and len(texto.strip()) < 500:
         return "vacia_o_imagen"
 
