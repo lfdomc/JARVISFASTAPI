@@ -200,7 +200,7 @@ async def _crear_documento_maestro(nombre_archivo: str, contenido_markdown: str,
     return None
 
 
-async def _guardar_fragmento(texto: str, categoria: str, embedding: list, documento_id: str, metadata: dict, pagina_inicio: int | None = None, pagina_fin: int | None = None, seccion: str | None = None, tipo_contenido: str | None = None) -> bool:
+async def _guardar_fragmento(texto: str, categoria: str, embedding: list, documento_id: str, metadata: dict, pagina_inicio: int | None = None, pagina_fin: int | None = None, seccion: str | None = None, tipo_contenido: str | None = None, idioma: str | None = None) -> bool:
     url = f"{_base()}/rest/v1/fragmentos_vectoriales_gdp"
     payload = [{
         "documento_id": documento_id,
@@ -212,6 +212,7 @@ async def _guardar_fragmento(texto: str, categoria: str, embedding: list, docume
         "pagina_fin": pagina_fin,
         "seccion": seccion,
         "tipo_contenido": tipo_contenido,
+        "idioma": idioma,
     }]
     async with httpx.AsyncClient(timeout=20.0) as client:
         resp = await client.post(url, json=payload, headers=_headers({"Prefer": "return=minimal"}))
@@ -387,6 +388,13 @@ async def _procesar_documento_en_segundo_plano(documento_id: str, nombre: str, p
                 "CALIDAD_INGESTA", resumen_legible(reporte_calidad), nombre,
                 "Revisar el reporte completo en documentos_gdp.reporte_calidad_ingesta — no bloquea la subida."
             )
+        if reporte_calidad.get("idioma_mezclado"):
+            await logging_utils.registrar_error(
+                "CALIDAD_INGESTA_IDIOMA",
+                f"Idioma mezclado: dominante '{reporte_calidad['idioma_dominante']}' cubre solo el {reporte_calidad['porcentaje_idioma_dominante']*100:.0f}% de los fragmentos",
+                nombre,
+                "Revisar si el documento tiene secciones en otro idioma que ameriten aviso al usuario o prompt distinto — no bloquea la subida."
+            )
 
         # Cruza el ÍNDICE del documento (su propia respuesta correcta)
         # contra los fragmentos ya trocedos — sin IA, sin datos externos.
@@ -467,7 +475,7 @@ async def _procesar_documento_en_segundo_plano(documento_id: str, nombre: str, p
             exito = await _guardar_fragmento(
                 chunk["texto"], categoria_final, embedding, documento_id, metadata,
                 pagina_inicio=chunk["pagina_inicio"], pagina_fin=chunk["pagina_fin"], seccion=seccion,
-                tipo_contenido=chunk.get("tipo_contenido"),
+                tipo_contenido=chunk.get("tipo_contenido"), idioma=chunk.get("idioma"),
             )
             if exito:
                 guardados += 1

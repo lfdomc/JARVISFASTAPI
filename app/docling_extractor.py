@@ -13,15 +13,59 @@ de tabla Markdown real — se reutiliza TAL CUAL toda la maquinaria de
 chunking.py que ya construimos (seguimiento continuo de página, unión de
 palabras cortadas por guion, preservación de tablas como unidad) sin
 tocarla, porque ya sabe reconocer y proteger tablas en Markdown.
+
+DESCRIPCIÓN DE IMÁGENES (Picture Description): cuando Docling encuentra
+un gráfico o infografía que no se puede leer como texto (los glifos
+ilegibles /gid0013X que vimos en el plan de turismo), en vez de dejarlo
+en blanco o con texto roto, le manda la imagen renderizada a Gemini por
+su endpoint compatible con OpenAI y pide una descripción en español —
+esa descripción queda como texto real, buscable y citable en el
+fragmento. Usa UNA sola clave del pool existente (no la rotación
+completa) porque esto corre poco — solo cuando hay imágenes — y a
+diferencia de los embeddings, no se espera volumen alto por documento.
 """
 import asyncio
 import logging
 import os
 import tempfile
+from app.config import settings
 
 logger = logging.getLogger("docling_extractor")
 
 TIMEOUT_SEGUNDOS = 180  # una conversión con modelos de layout puede tardar; si se pasa, cae al respaldo
+MODELO_DESCRIPCION_IMAGENES = "gemini-2.5-flash"
+PROMPT_DESCRIPCION_IMAGENES = (
+    "Describe este gráfico o imagen en 2-3 oraciones, en español. Si es un "
+    "gráfico de datos (barras, líneas, torta), menciona las cifras y "
+    "tendencias visibles con la mayor precisión posible. Si es una foto o "
+    "ilustración, describe lo que muestra de forma concisa."
+)
+
+
+def _configurar_pipeline_con_descripcion_imagenes():
+    """Arma las opciones de Docling con Picture Description apuntando al
+    endpoint de Gemini compatible con OpenAI. Si no hay ninguna clave de
+    Gemini configurada, se desactiva esta parte sin fallar — Docling
+    sigue funcionando normal, solo sin describir imágenes."""
+    from docling.datamodel.pipeline_options import PdfPipelineOptions, PictureDescriptionApiOptions
+
+    opciones = PdfPipelineOptions()
+
+    claves = settings.obtener_pool_claves_gemini()
+    if claves:
+        opciones.do_picture_description = True
+        opciones.generate_picture_images = True  # necesario para tener la imagen que enviar
+        opciones.picture_description_options = PictureDescriptionApiOptions(
+            url="https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            headers={"Authorization": f"Bearer {claves[0]}"},
+            params={"model": MODELO_DESCRIPCION_IMAGENES},
+            prompt=PROMPT_DESCRIPCION_IMAGENES,
+            timeout=45.0,
+        )
+    else:
+        logger.warning("[DOCLING] Sin claves de Gemini configuradas — se omite la descripción de imágenes.")
+
+    return opciones
 
 
 def _convertir_sincrono(ruta_archivo: str) -> dict | None:
@@ -36,10 +80,14 @@ def _convertir_sincrono(ruta_archivo: str) -> dict | None:
     tabla de contenidos puede de todas formas obtener columna 'seccion'
     poblada, algo imposible con el detector de índice basado en regex."""
     try:
-        from docling.document_converter import DocumentConverter
+        from docling.document_converter import DocumentConverter, PdfFormatOption
+        from docling.datamodel.base_models import InputFormat
         from docling_core.types.doc import SectionHeaderItem, TitleItem
 
-        conversor = DocumentConverter()
+        opciones = _configurar_pipeline_con_descripcion_imagenes()
+        conversor = DocumentConverter(
+            format_options={InputFormat.PDF: PdfFormatOption(pipeline_options=opciones)}
+        )
         resultado = conversor.convert(ruta_archivo)
         documento = resultado.document
 
@@ -68,6 +116,37 @@ def _convertir_sincrono(ruta_archivo: str) -> dict | None:
     except Exception as e:
         logger.warning(f"[DOCLING] Falló la extracción ({type(e).__name__}: {e}) — se usará el respaldo de pypdf.")
         return None
+
+
+async def extraer_paginas_con_docling(contenido_bytes: bytes) -> dict | None:
+    """
+    Punto de entrada — recibe los bytes del PDF (igual que el extractor
+    de pypdf), intenta convertir con Docling en un hilo aparte (para no
+    congelar el event loop de FastAPI mientras corre el modelo de
+    layout), con límite de tiempo. Si algo sale mal, o se agota el
+    tiempo, devuelve None — el llamador debe caer al respaldo de pypdf.
+
+    Devuelve {"paginas": list[str], "encabezados": list[dict]} en éxito.
+    """
+    archivo_temporal = None
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(contenido_bytes)
+            archivo_temporal = tmp.name
+
+        return await asyncio.wait_for(
+            asyncio.to_thread(_convertir_sincrono, archivo_temporal),
+            timeout=TIMEOUT_SEGUNDOS,
+        )
+    except asyncio.TimeoutError:
+        logger.warning(f"[DOCLING] Tiempo de espera agotado ({TIMEOUT_SEGUNDOS}s) — se usará el respaldo de pypdf.")
+        return None
+    except Exception as e:
+        logger.warning(f"[DOCLING] Excepción inesperada ({type(e).__name__}: {e}) — se usará el respaldo de pypdf.")
+        return None
+    finally:
+        if archivo_temporal and os.path.exists(archivo_temporal):
+            os.remove(archivo_temporal)
 
 
 async def extraer_paginas_con_docling(contenido_bytes: bytes) -> dict | None:

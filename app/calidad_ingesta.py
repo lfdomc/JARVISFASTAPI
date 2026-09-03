@@ -65,6 +65,23 @@ def auditar_calidad_ingesta(chunks: list[dict], total_paginas: int) -> dict:
 
     paginas_sin_cobertura = [p for p in range(1, total_paginas + 1) if p not in paginas_cubiertas]
 
+    # Idioma mezclado: si el idioma dominante no cubre la gran mayoría de
+    # los fragmentos, es una señal real — puede que el documento tenga
+    # secciones en otro idioma (ej. anexos en inglés) que ameriten un
+    # prompt distinto o un aviso al usuario, no solo tratarlo todo como
+    # español por defecto.
+    idiomas_detectados = [c.get("idioma") for c in chunks if c.get("idioma")]
+    idioma_dominante = None
+    porcentaje_idioma_dominante = 1.0
+    if idiomas_detectados:
+        conteo = {}
+        for idioma in idiomas_detectados:
+            conteo[idioma] = conteo.get(idioma, 0) + 1
+        idioma_dominante = max(conteo, key=conteo.get)
+        porcentaje_idioma_dominante = conteo[idioma_dominante] / len(idiomas_detectados)
+
+    idioma_mezclado = idioma_dominante is not None and porcentaje_idioma_dominante < 0.85
+
     ok = not fragmentos_palabra_cortada and not paginas_sin_cobertura
 
     return {
@@ -73,12 +90,15 @@ def auditar_calidad_ingesta(chunks: list[dict], total_paginas: int) -> dict:
         "paginas_sin_cobertura": paginas_sin_cobertura,
         "fragmentos_tamano_anomalo": fragmentos_tamano_anomalo,
         "total_fragmentos": len(chunks),
+        "idioma_dominante": idioma_dominante,
+        "porcentaje_idioma_dominante": round(porcentaje_idioma_dominante, 2),
+        "idioma_mezclado": idioma_mezclado,
     }
 
 
 def resumen_legible(reporte: dict) -> str:
     """Versión corta para logs — una línea, fácil de escanear en Railway."""
-    if reporte["ok"] and not reporte["fragmentos_tamano_anomalo"]:
+    if reporte["ok"] and not reporte["fragmentos_tamano_anomalo"] and not reporte.get("idioma_mezclado"):
         return f"✅ Calidad de ingesta OK ({reporte['total_fragmentos']} fragmentos, sin anomalías)."
 
     partes = []
@@ -88,6 +108,8 @@ def resumen_legible(reporte: dict) -> str:
         partes.append(f"{len(reporte['paginas_sin_cobertura'])} página(s) sin cobertura: {reporte['paginas_sin_cobertura'][:10]}")
     if reporte["fragmentos_tamano_anomalo"]:
         partes.append(f"{len(reporte['fragmentos_tamano_anomalo'])} fragmento(s) de tamaño atípico")
+    if reporte.get("idioma_mezclado"):
+        partes.append(f"idioma mezclado (dominante: {reporte['idioma_dominante']}, {reporte['porcentaje_idioma_dominante']*100:.0f}% de los fragmentos)")
 
     return "⚠️ Calidad de ingesta con hallazgos: " + "; ".join(partes)
 

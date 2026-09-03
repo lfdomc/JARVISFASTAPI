@@ -1,4 +1,5 @@
 import re
+from langdetect import detect, LangDetectException
 
 MIN_CARACTERES_CHUNK_VALIDO = 60
 MARCADOR_PAGINA = "\x00PAGINA:{n}\x00"
@@ -30,6 +31,18 @@ def _clasificar_tipo_contenido(texto: str) -> str:
         return "titulo"
 
     return "texto"
+
+
+def _detectar_idioma(texto: str) -> str | None:
+    """Detecta el idioma de un fragmento — no cambia nada del troceo,
+    solo etiqueta cada fragmento para poder alertar si un documento
+    resulta mezclado en idiomas (ver calidad_ingesta.py). Con texto muy
+    corto o ambiguo, langdetect puede fallar — se trata como
+    'desconocido' en vez de romper el troceo del documento."""
+    try:
+        return detect(texto)
+    except LangDetectException:
+        return None
 
 
 def _unir_palabras_cortadas(lineas: list[str]) -> list[str]:
@@ -200,6 +213,7 @@ def crear_chunks_con_paginas(paginas: list[str], max_palabras: int = 350) -> lis
             "pagina_inicio": chunk["pagina_inicio"],
             "pagina_fin": chunk["pagina_fin"],
             "tipo_contenido": _clasificar_tipo_contenido(texto_limpio),
+            "idioma": _detectar_idioma(texto_limpio),
         })
 
     if not resultado and paginas:
@@ -208,6 +222,7 @@ def crear_chunks_con_paginas(paginas: list[str], max_palabras: int = 350) -> lis
             resultado = [{
                 "texto": texto_plano, "pagina_inicio": 1, "pagina_fin": len(paginas),
                 "tipo_contenido": _clasificar_tipo_contenido(texto_plano),
+                "idioma": _detectar_idioma(texto_plano),
             }]
 
     return resultado
