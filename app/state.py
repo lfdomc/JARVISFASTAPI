@@ -16,11 +16,13 @@ TTL_IDEMPOTENCIA_SEG = 600
 TTL_CATEGORIA_PENDIENTE_SEG = 600
 TTL_ESPERANDO_CATEGORIA_SEG = 300
 TTL_CACHE_FAQ_SEG = 10800
+TTL_CACHE_CATEGORIAS_SEG = 1800  # 30 min — las categorías cambian poco, no hace falta consultarlas en cada mensaje
 
 _updates_procesados: dict[int, float] = {}
 _categorias_pendientes: dict[str, dict] = {}
 _esperando_categoria_nueva: dict[str, str] = {}  # chat_id -> token
 _cache_faq: dict[str, tuple[str, float]] = {}
+_cache_pares_categoria: tuple[list[dict], float] | None = None
 
 
 def _limpiar_vencidos(store: dict, ttl: int, ahora: float):
@@ -74,3 +76,19 @@ def cache_faq_get(clave: str) -> str | None:
 
 def cache_faq_set(clave: str, valor: str):
     _cache_faq[clave] = (valor, time.time())
+
+
+def cache_pares_categoria_get() -> list[dict] | None:
+    global _cache_pares_categoria
+    if not _cache_pares_categoria:
+        return None
+    datos, ts = _cache_pares_categoria
+    if (time.time() - ts) > TTL_CACHE_CATEGORIAS_SEG:
+        _cache_pares_categoria = None
+        return None
+    return datos
+
+
+def cache_pares_categoria_set(datos: list[dict]):
+    global _cache_pares_categoria
+    _cache_pares_categoria = (datos, time.time())

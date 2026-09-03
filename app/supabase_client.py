@@ -34,7 +34,7 @@ async def buscar_por_numero_pagina(numero_pagina: int, telegram_id_solicitante: 
         resp = await client.get(
             f"{_base_url()}/rest/v1/fragmentos_vectoriales_gdp"
             f"?pagina_inicio=lte.{numero_pagina}&pagina_fin=gte.{numero_pagina}"
-            f"&select=id,contenido_chunk,categoria,metadata,pagina_inicio,pagina_fin,seccion,documento_id"
+            f"&select=id,contenido_chunk,categoria,subcategoria,metadata,pagina_inicio,pagina_fin,seccion,documento_id"
             f"&order=pagina_inicio.asc"
             f"&limit={limite}",
             headers=_headers()
@@ -79,7 +79,7 @@ async def buscar_por_numero_seccion(numero_seccion: str, telegram_id_solicitante
         resp = await client.get(
             f"{_base_url()}/rest/v1/fragmentos_vectoriales_gdp"
             f"?seccion=ilike.*{numero_seccion}*"
-            f"&select=id,contenido_chunk,categoria,metadata,pagina_inicio,pagina_fin,seccion,documento_id"
+            f"&select=id,contenido_chunk,categoria,subcategoria,metadata,pagina_inicio,pagina_fin,seccion,documento_id"
             f"&order=pagina_inicio.asc"
             f"&limit={limite}",
             headers=_headers()
@@ -190,3 +190,27 @@ async def guardar_mensaje_historial(telegram_id: str, rol: str, contenido: str) 
     payload = {"telegram_id": telegram_id, "role": rol, "contenido": contenido}
     async with httpx.AsyncClient(timeout=15.0) as client:
         await client.post(url, json=payload, headers={**_headers(), "Prefer": "return=minimal"})
+
+
+async def obtener_pares_categoria_subcategoria() -> list[dict]:
+    """Pares únicos de (categoria, subcategoria) que existen hoy en la
+    base — se usa para detectar automáticamente si una pregunta menciona
+    el nombre de una categoría/subcategoría real, y filtrar la búsqueda
+    por eso. Se cachea (ver state.py) para no consultar esto en cada
+    mensaje."""
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(
+            f"{_base_url()}/rest/v1/fragmentos_vectoriales_gdp?select=categoria,subcategoria&limit=5000",
+            headers=_headers()
+        )
+        if resp.status_code != 200:
+            return []
+        filas = resp.json()
+        vistos = set()
+        pares = []
+        for f in filas:
+            clave = (f.get("categoria"), f.get("subcategoria"))
+            if clave not in vistos and f.get("categoria"):
+                vistos.add(clave)
+                pares.append({"categoria": f.get("categoria"), "subcategoria": f.get("subcategoria")})
+        return pares

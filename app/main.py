@@ -80,11 +80,21 @@ def _ensamblar_respuesta_estructurada(items: list[AfirmacionEstructurada], mapa_
     número de fragmento por la página/sección REAL — misma sustitución
     determinística de siempre, solo que ahora parte de datos ya
     validados por Pydantic, no diccionarios sueltos. Soporta varios
-    fragmentos por afirmación (ej. una frase que combina dos datos)."""
+    fragmentos por afirmación (ej. una frase que combina dos datos).
+
+    Cuando varias afirmaciones SEGUIDAS citan la MISMA sección (aunque
+    sean fragmentos distintos, con sub-rangos de página distintos — ej.
+    "sección 5.2" repartida en fragmentos de las páginas 101-102,
+    102-103 y 104-105), se agrupan en una sola cita con el rango de
+    página real MÍNIMO-MÁXIMO calculado a partir de los fragmentos
+    citados — nunca adivinado por el modelo, siempre de los números
+    reales — en vez de repetir la misma sección 3 veces con sub-rangos
+    distintos. La verificación de cada afirmación por separado no cambia
+    en nada, esto solo afecta cómo se ve el texto final."""
     nombres_documentos = {f.get('nombre_documento') for f in mapa_fragmentos.values() if f.get('nombre_documento')}
     mostrar_documento = len(nombres_documentos) > 1
 
-    partes = []
+    pares = []  # [(texto, [(doc, seccion, pagina_inicio, pagina_fin), ...]), ...]
     for item in items:
         texto = item.texto.strip()
         if not texto:
@@ -98,9 +108,8 @@ def _ensamblar_respuesta_estructurada(items: list[AfirmacionEstructurada], mapa_
         if not texto:
             continue
 
-        citas = []
+        piezas = []
         for frag_num in item.fragmentos:
-
             f = mapa_fragmentos.get(f"F{frag_num}")
             if not f:
                 continue
@@ -110,12 +119,50 @@ def _ensamblar_respuesta_estructurada(items: list[AfirmacionEstructurada], mapa_
             seccion = f.get('seccion')
             if not p_ini:
                 continue
-            pagina_str = f"pág. {p_ini}" if p_ini == p_fin else f"págs. {p_ini}-{p_fin}"
-            doc_str = f"{f.get('nombre_documento')}, " if mostrar_documento else ""
-            citas.append(f"{doc_str}{pagina_str}{', sección ' + seccion if seccion else ''}")
+            piezas.append((f.get('nombre_documento'), seccion, p_ini, p_fin))
 
-        cita_final = f" ({'; '.join(citas)})" if citas else ""
-        partes.append(f"{texto}{cita_final}")
+        pares.append((texto, piezas))
+
+    def _clave_agrupacion(piezas):
+        # Agrupa por QUÉ (documento, sección) se está citando — no por
+        # la página exacta, así fragmentos distintos de la misma sección
+        # sí se agrupan entre sí.
+        return frozenset((doc, sec) for doc, sec, _, _ in piezas)
+
+    def _formatear_citas(piezas):
+        # Consolida por (documento, sección): rango de página real
+        # mínimo-máximo entre todas las piezas que comparten esa sección.
+        consolidado = {}
+        for doc, sec, p_ini, p_fin in piezas:
+            clave = (doc, sec)
+            if clave not in consolidado:
+                consolidado[clave] = [p_ini, p_fin]
+            else:
+                consolidado[clave][0] = min(consolidado[clave][0], p_ini)
+                consolidado[clave][1] = max(consolidado[clave][1], p_fin)
+
+        citas = []
+        for (doc, sec), (p_ini, p_fin) in consolidado.items():
+            pagina_str = f"pág. {p_ini}" if p_ini == p_fin else f"págs. {p_ini}-{p_fin}"
+            doc_str = f"{doc}, " if mostrar_documento else ""
+            citas.append(f"{doc_str}{pagina_str}{', sección ' + sec if sec else ''}")
+        return f" ({'; '.join(citas)})" if citas else ""
+
+    # Agrupa corridas consecutivas que citan la(s) misma(s) sección(es)
+    # — el texto se une, las páginas se consolidan en un rango real.
+    partes = []
+    i = 0
+    while i < len(pares):
+        texto_grupo = [pares[i][0]]
+        piezas_grupo = list(pares[i][1])
+        clave = _clave_agrupacion(piezas_grupo)
+        j = i + 1
+        while j < len(pares) and clave and _clave_agrupacion(pares[j][1]) == clave:
+            texto_grupo.append(pares[j][0])
+            piezas_grupo.extend(pares[j][1])
+            j += 1
+        partes.append(f"{' '.join(texto_grupo)}{_formatear_citas(piezas_grupo)}")
+        i = j
 
     return " ".join(partes)
 
@@ -188,7 +235,7 @@ def _normalizar_para_cache(texto: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[¿?¡!.,;:\"'()\[\]{}]", "", texto.lower())).strip()
 
 
-VERSION_BACKEND = "2026-09-02-dashboard-subcategoria"  # cámbialo cada vez que quieras confirmar un despliegue específico
+VERSION_BACKEND = "2026-09-02-citas-consolidadas-sin-subcategoria"  # cámbialo cada vez que quieras confirmar un despliegue específico
 
 
 @app.get("/")
