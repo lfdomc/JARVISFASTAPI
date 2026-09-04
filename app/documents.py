@@ -471,6 +471,18 @@ async def _extraer_e_indexar_pdf_en_segundo_plano(documento_id: str, nombre: str
         if resultado_indice:
             indice_markdown = resultado_indice["markdown"]
             logger.info(f"[{nombre}] Índice detectado (págs. {resultado_indice['pagina_encontrado']}-{resultado_indice['pagina_fin_indice']}, {len(resultado_indice['entradas'])} entradas) — tipo probable: {resultado_indice['tipo_documento_probable']}")
+            # NO se completa con encabezados de Docling cuando el índice
+            # de pypdf sí encontró algo — se intentó (para casos como
+            # "Bibliografía" ausente del índice impreso), pero requería
+            # reglas hechas a la medida de UN documento específico (la
+            # lista de categorías FODA) para evitar contaminación, y eso
+            # no es genérico: cada tipo de documento tendría su propio
+            # conjunto de "categorías internas" distintas (financieros,
+            # legales, etc.) que romperían la misma lógica de formas
+            # distintas. Si el índice impreso de un documento omite una
+            # sección, se queda omitida — es una limitación real del
+            # documento fuente, no algo que debamos adivinar con
+            # excepciones específicas por documento.
         elif encabezados_docling:
             # Mismo bug que ya se había corregido antes en el flujo viejo,
             # colado de nuevo al escribir esta función nueva: indice_markdown
