@@ -237,41 +237,93 @@ def _convertir_sincrono(ruta_archivo: str) -> dict | None:
         return None
 
 
+def _proceso_hijo_docling(ruta_archivo: str, cola: "multiprocessing.Queue"):
+    """
+    Función objetivo del proceso hijo — corre en un proceso del sistema
+    operativo COMPLETAMENTE APARTE del proceso principal de FastAPI. Todo
+    lo que Docling necesita (PyTorch, los modelos de layout/OCR/tablas)
+    se carga SOLO aquí dentro, nunca en el proceso principal.
+
+    Por qué esto resuelve el gasto de memoria de raíz: PyTorch casi nunca
+    le devuelve memoria al sistema operativo mientras el proceso que la
+    pidió siga vivo — es un comportamiento conocido de la librería, no
+    algo que se pueda "limpiar" con código dentro del mismo proceso. La
+    única forma confiable de recuperar esa memoria es que el proceso
+    completo termine. Al aislar Docling en su propio proceso hijo, cuando
+    termina de procesar UN documento, el proceso se cierra por completo
+    y el sistema operativo recupera el 100% de su memoria — garantizado,
+    no una esperanza.
+
+    Beneficio adicional real: si Docling llegara a quedarse sin memoria
+    procesando un documento (como pasó hoy con el manual de 545 páginas),
+    ahora solo muere ESTE proceso hijo — el proceso principal de FastAPI
+    sigue vivo y atendiendo a otros usuarios sin interrupción. Antes, ese
+    mismo crash tumbaba el contenedor completo.
+    """
+    try:
+        resultado = _convertir_sincrono(ruta_archivo)
+        cola.put(("ok", resultado))
+    except Exception as e:
+        cola.put(("error", f"{type(e).__name__}: {e}"))
+
+
 async def extraer_paginas_con_docling(contenido_bytes: bytes) -> dict | None:
     """
     Punto de entrada — recibe los bytes del PDF (igual que el extractor
-    de pypdf), intenta convertir con Docling en un hilo aparte (para no
-    congelar el event loop de FastAPI mientras corre el modelo de
-    layout), con límite de tiempo. Si algo sale mal, o se agota el
-    tiempo, devuelve None — el llamador debe caer al respaldo de pypdf.
+    de pypdf), y lanza la conversión real en un PROCESO HIJO aparte del
+    sistema operativo (no un hilo) — así, cuando termina, su memoria se
+    libera de verdad, sin depender de que Python decida devolverla. Si
+    algo sale mal, se agota el tiempo, o el proceso hijo se cae, devuelve
+    None — el llamador debe caer al respaldo de pypdf.
 
-    OJO — límite importante de esta implementación: si el tiempo se
-    agota, este código dejar de ESPERAR al hilo de Docling y cae al
-    respaldo — pero el hilo en sí sigue corriendo de fondo hasta que
-    termine solo (Python no puede matar un hilo desde afuera). No debería
-    causar un problema funcional (el resultado de ese hilo tardío
-    simplemente se descarta), pero si el timeout se alcanza seguido,
-    vale la pena saber que el trabajo de Docling no se cancela de
-    verdad, solo se deja de esperar.
+    A diferencia del diseño anterior con hilos (donde un timeout dejaba
+    de ESPERAR pero el hilo seguía corriendo de fondo sin poder matarlo),
+    con un proceso real si el tiempo se agota se le manda `.terminate()`
+    — que sí lo mata de verdad y libera su memoria de inmediato.
 
     Devuelve {"paginas": list[str], "encabezados": list[dict]} en éxito.
     """
+    import multiprocessing
+
     archivo_temporal = None
+    proceso = None
     try:
         with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
             tmp.write(contenido_bytes)
             archivo_temporal = tmp.name
 
-        return await asyncio.wait_for(
-            asyncio.to_thread(_convertir_sincrono, archivo_temporal),
-            timeout=TIMEOUT_SEGUNDOS,
-        )
-    except asyncio.TimeoutError:
-        logger.warning(f"[DOCLING] Tiempo de espera agotado ({TIMEOUT_SEGUNDOS}s) — se usará el respaldo de pypdf.")
-        return None
+        cola = multiprocessing.Queue()
+        proceso = multiprocessing.Process(target=_proceso_hijo_docling, args=(archivo_temporal, cola))
+        proceso.start()
+
+        # proceso.join() y cola.get() son bloqueantes — se corren en un
+        # hilo aparte (asyncio.to_thread) SOLO para esperar sin congelar
+        # el event loop de FastAPI. El trabajo pesado en sí ya está en el
+        # proceso hijo, no en este hilo de espera.
+        def _esperar():
+            proceso.join(timeout=TIMEOUT_SEGUNDOS)
+            if proceso.is_alive():
+                return ("timeout", None)
+            if not cola.empty():
+                return cola.get()
+            return ("error", f"El proceso hijo terminó (código {proceso.exitcode}) sin devolver ningún resultado — probablemente se quedó sin memoria (OOM) y el sistema operativo lo mató directamente.")
+
+        estado, valor = await asyncio.to_thread(_esperar)
+
+        if estado == "timeout":
+            logger.warning(f"[DOCLING] Tiempo de espera agotado ({TIMEOUT_SEGUNDOS}s) — se termina el proceso hijo y se usará el respaldo de pypdf.")
+            proceso.terminate()
+            proceso.join(timeout=10)
+            return None
+        if estado == "error":
+            logger.warning(f"[DOCLING] El proceso hijo falló ({valor}) — se usará el respaldo de pypdf.")
+            return None
+        return valor
     except Exception as e:
-        logger.warning(f"[DOCLING] Excepción inesperada ({type(e).__name__}: {e}) — se usará el respaldo de pypdf.")
+        logger.warning(f"[DOCLING] Excepción inesperada lanzando el proceso hijo ({type(e).__name__}: {e}) — se usará el respaldo de pypdf.")
         return None
     finally:
+        if proceso is not None and proceso.is_alive():
+            proceso.terminate()
         if archivo_temporal and os.path.exists(archivo_temporal):
             os.remove(archivo_temporal)

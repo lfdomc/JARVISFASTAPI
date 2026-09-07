@@ -269,7 +269,7 @@ def _normalizar_para_cache(texto: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[¿?¡!.,;:\"'()\[\]{}]", "", texto.lower())).strip()
 
 
-VERSION_BACKEND = "2026-09-04-memoria-documento-reciente"  # cámbialo cada vez que quieras confirmar un despliegue específico
+VERSION_BACKEND = "2026-09-06-docling-proceso-aislado"  # cámbialo cada vez que quieras confirmar un despliegue específico
 
 
 @app.get("/")
