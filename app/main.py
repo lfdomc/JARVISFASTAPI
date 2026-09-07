@@ -269,7 +269,7 @@ def _normalizar_para_cache(texto: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[¿?¡!.,;:\"'()\[\]{}]", "", texto.lower())).strip()
 
 
-VERSION_BACKEND = "2026-09-06-docling-proceso-aislado"  # cámbialo cada vez que quieras confirmar un despliegue específico
+VERSION_BACKEND = "2026-09-06-nombre-documento-solo-si-hace-falta"  # cámbialo cada vez que quieras confirmar un despliegue específico
 
 
 @app.get("/")
@@ -511,10 +511,23 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
         def _sustituir_marcadores(texto: str) -> str:
             """Reemplaza cada [F<n>] por la página/sección real de ESE
             fragmento específico — determinístico, nunca lo escribe el modelo.
-            Si hay más de un documento entre los fragmentos usados, también
-            agrega el nombre del documento — con uno solo, se omite para no
-            ensuciar la cita con algo redundante."""
-            nombres_documentos = {f.get('nombre_documento') for f in mapa_fragmentos.values() if f.get('nombre_documento')}
+            Si hay más de un documento entre los fragmentos REALMENTE
+            CITADOS (no solo los que se ofrecieron como candidatos), también
+            agrega el nombre del documento — con uno solo, se omite.
+
+            BUG REAL encontrado hoy: antes se contaba sobre TODOS los
+            fragmentos candidatos (mapa_fragmentos.values()), no solo los
+            usados — con dos documentos activos en la base (ej. el plan de
+            turismo y el manual CLIA 1000), la búsqueda podía traer
+            candidatos de ambos aunque la respuesta final solo citara uno,
+            mostrando el nombre del documento de forma redundante cuando en
+            realidad no hacía falta."""
+            marcadores_en_texto = set(re.findall(r"\[(F\d+)\]", texto))
+            nombres_documentos = {
+                mapa_fragmentos[m].get('nombre_documento')
+                for m in marcadores_en_texto
+                if m in mapa_fragmentos and mapa_fragmentos[m].get('nombre_documento')
+            }
             mostrar_documento = len(nombres_documentos) > 1
 
             def _reemplazo(m):
@@ -633,9 +646,12 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
                 "- Las comillas son un compromiso literal: solo cita entre comillas texto que aparece "
                 "exactamente así en los fragmentos. Nunca inventes una frase o adjetivo que 'suene' al "
                 "documento y la pongas entre comillas — si no la encuentras literal, no la cites.\n"
-                "- Si necesitas referenciar la página de un dato, no escribas tú el número — usa el "
-                "marcador del fragmento (ej. [F2]) inmediatamente después del dato; el sistema lo "
-                "reemplaza automáticamente por la página real.\n"
+                "- Si necesitas referenciar la página de un dato, no escribas tú el número — coloca "
+                "SOLO el marcador del fragmento (ej. [F2]) inmediatamente después del dato, SIN "
+                "paréntesis ni la palabra \"pág.\" alrededor tuyo — el sistema reemplaza el marcador "
+                "completo por la cita final YA lista, con sus propios paréntesis y el número de página "
+                "real incluidos (ej. [F2] se convierte en \"(pág. 45)\"). Si tú además le pones tus "
+                "propios paréntesis, queda una cita duplicada y rota, como \"(pág. (pág. 45))\".\n"
                 "- RESPUESTA ESTRUCTURADA A PREGUNTAS ESTRUCTURADAS: si preguntan específicamente por una "
                 "SECCIÓN (ej. \"¿qué nombre tiene la sección 3.5?\", \"explícame la sección X\"), la "
                 "PRIMERA frase de tu respuesta debe dar el nombre/título de esa sección Y su página — no "
