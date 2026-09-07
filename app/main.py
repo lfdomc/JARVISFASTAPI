@@ -224,6 +224,40 @@ PATRON_MODO_PROFUNDO = re.compile(
     r"\b(compara|comparaci[oó]n|analiza|an[aá]lisis|sintetiza|s[ií]ntesis|"
     r"resume todo|resumen completo|en profundidad|a fondo)\b", re.IGNORECASE
 )
+EMPUJON_DOCUMENTO_RECIENTE = 1.12  # moderado a propósito — desempata, no domina.
+# Si otro documento tiene una coincidencia genuinamente mejor, sigue ganando
+# igual: 1.12x sobre una similitud baja no alcanza a superar una similitud
+# alta real de otro documento. Nunca RESTRINGE la búsqueda a un documento —
+# solo la sugiere, para el caso de ambigüedad real (ej. "anexo 1" repetido
+# en 30 documentos, cuando la conversación reciente ya habló de uno de ellos).
+
+
+def _sugerir_documento_reciente(fragmentos: list[dict], documento_reciente: str | None) -> list[dict]:
+    """
+    Empujón MODERADO (no una restricción) hacia el documento del que se
+    habló más recientemente en esta conversación — resuelve la
+    ambigüedad real de tener el mismo término (ej. "Anexo 1") repetido
+    en muchos documentos distintos, sin arriesgarse a quedar "pegado" al
+    documento equivocado si la pregunta nueva de verdad necesita otro.
+
+    Se aplica ANTES del filtro de alta confianza a propósito — así el
+    empujón también puede influir en qué fragmentos sobreviven ese
+    recorte, no solo en el orden de presentación.
+    """
+    if not documento_reciente or not fragmentos:
+        return fragmentos
+
+    for f in fragmentos:
+        similitud = f.get("similitud_coseno")
+        if similitud is not None and f.get("nombre_documento") == documento_reciente:
+            f["similitud_coseno"] = min(similitud * EMPUJON_DOCUMENTO_RECIENTE, 1.0)
+
+    return sorted(
+        fragmentos, key=lambda f: f.get("similitud_coseno") if f.get("similitud_coseno") is not None else -1,
+        reverse=True,
+    )
+
+
 PATRON_LINK = re.compile(r"^(guardar el link|guarda el link|guardar link|guarda link)\s*:", re.IGNORECASE)
 PATRON_URL = re.compile(r"https?://\S+", re.IGNORECASE)
 PATRON_MENCION_SECCION = re.compile(r"\b(secci[oó]n|cap[ií]tulo|eje(?:\s+estrat[ée]gico)?|anexo|art[ií]culo|t[ií]tulo|apartado|cl[aá]usula|inciso)\s+(\d+(?:\.\d+){0,3}|[IVXLCDM]+)\b", re.IGNORECASE)
@@ -235,7 +269,7 @@ def _normalizar_para_cache(texto: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[¿?¡!.,;:\"'()\[\]{}]", "", texto.lower())).strip()
 
 
-VERSION_BACKEND = "2026-09-04-docling-por-lotes"  # cámbialo cada vez que quieras confirmar un despliegue específico
+VERSION_BACKEND = "2026-09-04-memoria-documento-reciente"  # cámbialo cada vez que quieras confirmar un despliegue específico
 
 
 @app.get("/")
@@ -374,11 +408,13 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
     match_count = MATCH_COUNT_PROFUNDO if modo_profundo else MATCH_COUNT_RAPIDO
 
     historial = await supabase_client.obtener_historial_conversacion(telegram_id)
+    documento_reciente = await supabase_client.obtener_documento_reciente_de_conversacion(telegram_id)
 
     # Caché de FAQ: solo para preguntas cortas sin historial, sin URL, modo rápido
     aplica_cache = (not modo_profundo) and (not tiene_url) and (len(historial) == 0) and len(texto_usuario.split()) >= 4
     clave_cache = _normalizar_para_cache(texto_usuario) if aplica_cache else None
     respuesta = clave_cache and state.cache_faq_get(clave_cache)
+    fuentes_citadas: list[dict] = []  # se llena solo si corre el flujo RAG completo (no en respuestas de caché)
 
     if not respuesta:
         embedding_pregunta = await gemini_client.generar_embedding(texto_usuario)
@@ -439,6 +475,7 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
                 contexto_fragmentos = nuevos + contexto_fragmentos
                 logger.info(f"[BÚSQUEDA POR PÁGINA] '{mencion_pagina.group(1)}' agregó {len(nuevos)} fragmento(s) directos.")
 
+        contexto_fragmentos = _sugerir_documento_reciente(contexto_fragmentos, documento_reciente)
         contexto_fragmentos = _filtrar_por_alta_confianza(contexto_fragmentos)
 
         # Expansión de contexto por vecindad — DESACTIVADA por ahora: se
@@ -684,8 +721,39 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
         # Sustitución determinística: cambia cada [F<n>] por la página y
         # sección REALES de ese fragmento — el modelo nunca escribió el
         # número él mismo, así que no hay margen para que lo copie mal.
+        # Antes de sustituir los marcadores, se identifica cuáles se
+        # usaron REALMENTE (no todos los que se ofrecieron como contexto)
+        # — esto es lo que se guarda como "fuente citada" para la memoria
+        # de conversación (ver _sugerir_documento_reciente) y para el
+        # resumen de fuentes al final del mensaje.
+        # (fuentes_citadas ya se inicializó vacío antes del caché, arriba)
         if respuesta and mapa_fragmentos:
+            marcadores_usados = dict.fromkeys(re.findall(r"\[(F\d+)\]", respuesta))  # dict preserva orden, sin duplicados
+            vistos = set()
+            for marcador in marcadores_usados:
+                f = mapa_fragmentos.get(marcador)
+                if not f:
+                    continue
+                nombre_doc = f.get("nombre_documento")
+                if not nombre_doc or nombre_doc in vistos:
+                    continue
+                vistos.add(nombre_doc)
+                metadata = f.get("metadata") or {}
+                fuentes_citadas.append({
+                    "documento": nombre_doc,
+                    "pagina_inicio": f.get("pagina_inicio") or metadata.get("pagina_inicio"),
+                    "pagina_fin": f.get("pagina_fin") or metadata.get("pagina_fin"),
+                    "seccion": f.get("seccion"),
+                })
+
             respuesta = _sustituir_marcadores(respuesta)
+
+        # Resumen de fuente(s) SIEMPRE al final — aunque sea un solo
+        # documento, para que quede como un hábito consistente de la
+        # respuesta (decisión explícita: no solo cuando hay más de uno).
+        if fuentes_citadas:
+            nombres = [f["documento"] for f in fuentes_citadas]
+            respuesta += f"\n\n📄 _Fuente{'s' if len(nombres) > 1 else ''}: {', '.join(nombres)}_"
 
         if aplica_cache and clave_cache and respuesta:
             state.cache_faq_set(clave_cache, respuesta)
@@ -698,7 +766,7 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
     # rastro o que Telegram reintente la misma actualización de más.
     try:
         await supabase_client.guardar_mensaje_historial(telegram_id, "user", texto_usuario)
-        await supabase_client.guardar_mensaje_historial(telegram_id, "model", respuesta)
+        await supabase_client.guardar_mensaje_historial(telegram_id, "model", respuesta, fuentes_citadas=fuentes_citadas or None)
     except Exception as e:
         logger.warning(f"No se pudo guardar el turno en el historial (no afecta la respuesta ya enviada): {e}")
 

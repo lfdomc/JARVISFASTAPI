@@ -16,6 +16,7 @@ import unicodedata
 
 PATRON_COMILLAS = re.compile(r'["“”«»]([^"“”«»]{15,})["“”«»]')
 PATRON_PAGINA = re.compile(r'p[aá]g(?:s|ina[s]?)?\.?\s*(\d+)(?:\s*[-–—]\s*(\d+))?', re.IGNORECASE)
+PATRON_PARENTESIS = re.compile(r'\(([^()]*)\)')
 VENTANA_BUSQUEDA_PAGINA = 200  # caracteres después de la cita donde se busca su "(pág. N)"
 
 # Números "clave" — porcentajes y cantidades grandes — son exactamente el
@@ -139,7 +140,19 @@ def verificar_respuesta(respuesta: str, fragmentos: list[dict]) -> dict:
 
     paginas_no_verificadas = []
     if paginas_disponibles:
-        for p_ini_str, p_fin_str in PATRON_PAGINA.findall(respuesta):
+        # BUG REAL encontrado hoy: buscar "página N" en TODO el texto de
+        # la respuesta también atrapaba menciones sueltas del modelo a la
+        # numeración PROPIA e interna de algunos documentos (ej. un manual
+        # que imprime "1-42" como su propia paginación de capítulo) — el
+        # modelo las cita correctamente como texto descriptivo, pero el
+        # verificador las confundía con una cita real nuestra a las
+        # páginas 1 y 42 del PDF, que no existen en ese rango. Nuestras
+        # citas reales SIEMPRE vienen entre paréntesis (ver cómo se arma
+        # más arriba en main.py: "(pág. N)", "(págs. N-M, sección X)") —
+        # así que ahora solo se revisan números de página que aparezcan
+        # DENTRO de un paréntesis, nunca sueltos en prosa.
+        texto_parentesis = " ".join(PATRON_PARENTESIS.findall(respuesta))
+        for p_ini_str, p_fin_str in PATRON_PAGINA.findall(texto_parentesis):
             for p in filter(None, [p_ini_str, p_fin_str]):
                 p_num = int(p)
                 if p_num not in paginas_disponibles and p_num not in paginas_no_verificadas:

@@ -186,3 +186,43 @@ class TestMencionDeSeccionConNumeroSimple:
         completa ('capítulo I'), que no es ambigua aunque el número en
         sí tenga un solo carácter."""
         assert self._calcular_termino("¿qué dice el capítulo I?") == "capítulo I"
+
+
+class TestSugerenciaDeDocumentoReciente:
+    """El caso real: 30 documentos con 'Anexo 1' repetido — si la
+    conversación reciente ya habló de uno de ellos, se le da un empujón
+    MODERADO en el puntaje (nunca una restricción absoluta)."""
+
+    def test_desempata_cuando_esta_renido(self):
+        from app.main import _sugerir_documento_reciente
+        fragmentos = [
+            {"nombre_documento": "CLIA 900", "similitud_coseno": 0.60},
+            {"nombre_documento": "CLIA 1000", "similitud_coseno": 0.58},
+        ]
+        resultado = _sugerir_documento_reciente(fragmentos, documento_reciente="CLIA 1000")
+        assert resultado[0]["nombre_documento"] == "CLIA 1000"
+
+    def test_no_gana_contra_coincidencia_claramente_mejor(self):
+        """El empujón es moderado — nunca debe tapar una diferencia real
+        y grande a favor de otro documento."""
+        from app.main import _sugerir_documento_reciente
+        fragmentos = [
+            {"nombre_documento": "CLIA 900", "similitud_coseno": 0.95},
+            {"nombre_documento": "CLIA 1000", "similitud_coseno": 0.30},
+        ]
+        resultado = _sugerir_documento_reciente(fragmentos, documento_reciente="CLIA 1000")
+        assert resultado[0]["nombre_documento"] == "CLIA 900"
+
+    def test_sin_documento_reciente_no_altera_nada(self):
+        from app.main import _sugerir_documento_reciente
+        fragmentos = [{"nombre_documento": "X", "similitud_coseno": 0.5}]
+        resultado = _sugerir_documento_reciente(fragmentos, documento_reciente=None)
+        assert resultado[0]["similitud_coseno"] == 0.5
+
+    def test_nunca_pasa_de_1(self):
+        """El tope de 1.0 evita que el empujón produzca una similitud
+        'imposible' que confunda al filtro de alta confianza."""
+        from app.main import _sugerir_documento_reciente
+        fragmentos = [{"nombre_documento": "X", "similitud_coseno": 0.98}]
+        resultado = _sugerir_documento_reciente(fragmentos, documento_reciente="X")
+        assert resultado[0]["similitud_coseno"] <= 1.0

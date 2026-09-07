@@ -76,3 +76,27 @@ class TestVerificacionDePaginaPorCita:
         resultado = verificar_respuesta(respuesta, FRAGMENTOS_PRUEBA)
         assert len(resultado["citas_pagina_incorrecta"]) == 1
         assert resultado["citas_pagina_incorrecta"][0]["pagina_real"] == "pág. 140"
+
+
+class TestNumeracionInternaDelDocumentoNoSeConfundeConCita:
+    """Bug real encontrado hoy: un manual (CLIA 1000) imprime su propia
+    numeración interna de capítulo (ej. 'página 1-42', muy distinta a la
+    página real del PDF). El modelo la menciona correctamente como texto
+    descriptivo — pero el verificador la confundía con una cita real
+    nuestra, ya que buscaba 'página N' en TODO el texto, no solo dentro
+    de paréntesis (donde SIEMPRE van nuestras citas reales)."""
+
+    def test_numero_de_pagina_en_prosa_sin_parentesis_se_ignora(self):
+        fragmentos = [{"contenido_chunk": "contenido real de la página", "pagina_inicio": 79, "pagina_fin": 80, "seccion": None}]
+        respuesta = 'Se encuentra en la sección 1.5.2, en la página 1-42 (págs. 79-80).'
+        resultado = verificar_respuesta(respuesta, fragmentos)
+        assert resultado["paginas_no_verificadas"] == []
+
+    def test_cita_real_entre_parentesis_sigue_verificandose(self):
+        """El arreglo no debe volverse permisivo — una cita real (entre
+        paréntesis) que de verdad no corresponde a ningún fragmento debe
+        seguir marcándose."""
+        fragmentos = [{"contenido_chunk": "contenido real", "pagina_inicio": 79, "pagina_fin": 80, "seccion": None}]
+        respuesta = "Esto se encuentra en la página (pág. 999)."
+        resultado = verificar_respuesta(respuesta, fragmentos)
+        assert 999 in resultado["paginas_no_verificadas"]
