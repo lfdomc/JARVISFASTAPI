@@ -100,3 +100,40 @@ class TestNumeracionInternaDelDocumentoNoSeConfundeConCita:
         respuesta = "Esto se encuentra en la página (pág. 999)."
         resultado = verificar_respuesta(respuesta, fragmentos)
         assert 999 in resultado["paginas_no_verificadas"]
+
+
+class TestExigirMarcadorDeCita:
+    """El caso real de hoy: la instrucción decía 'SI necesitas citar' —
+    dejaba la decisión al modelo, y respondía la misma pregunta unas
+    veces con cita y otras sin ninguna, sin la línea de Fuentes al
+    final. Ahora es obligatorio, con esta red de seguridad a nivel de
+    código para cuando el modelo la ignore de todas formas."""
+
+    FRAGMENTOS_CMD = [{"contenido_chunk": "El CMD 800 es un analizador automático de química clínica", "pagina_inicio": 5, "pagina_fin": 5, "seccion": "CMD 800 F1"}]
+
+    def test_respuesta_sustancial_sin_ningun_marcador_falla(self):
+        respuesta = "Señor, el CMD 800 es un analizador automático de química clínica, diseñado para laboratorios de mediana complejidad, capaz de realizar pruebas fotométricas."
+        resultado = verificar_respuesta(respuesta, self.FRAGMENTOS_CMD, exigir_marcador_de_cita=True)
+        assert resultado["ok"] is False
+        assert resultado["sin_ninguna_cita"] is True
+
+    def test_respuesta_con_marcador_pasa(self):
+        respuesta = "Señor, el CMD 800 es un analizador automático de química clínica [F1]."
+        resultado = verificar_respuesta(respuesta, self.FRAGMENTOS_CMD, exigir_marcador_de_cita=True)
+        assert resultado["ok"] is True
+
+    def test_modo_profundo_no_exige_marcador(self):
+        """Modo profundo ya viene con citas reales sustituidas por
+        construcción — no debe exigir el marcador [F<n>], que ahí ni
+        siquiera aplica."""
+        respuesta = "Señor, el CMD 800 es un analizador automático de química clínica (pág. 5)."
+        resultado = verificar_respuesta(respuesta, self.FRAGMENTOS_CMD, exigir_marcador_de_cita=False)
+        assert resultado["ok"] is True
+
+    def test_saludo_corto_no_exige_cita(self):
+        resultado = verificar_respuesta("Buenos días, señor.", self.FRAGMENTOS_CMD, exigir_marcador_de_cita=True)
+        assert resultado["ok"] is True
+
+    def test_sin_fragmentos_no_exige_cita(self):
+        resultado = verificar_respuesta("Señor, no tengo información sobre eso en la base de conocimiento.", [], exigir_marcador_de_cita=True)
+        assert resultado["ok"] is True

@@ -269,7 +269,7 @@ def _normalizar_para_cache(texto: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[¿?¡!.,;:\"'()\[\]{}]", "", texto.lower())).strip()
 
 
-VERSION_BACKEND = "2026-09-06-nombre-documento-solo-si-hace-falta"  # cámbialo cada vez que quieras confirmar un despliegue específico
+VERSION_BACKEND = "2026-09-07-marcador-sin-corchetes"  # cámbialo cada vez que quieras confirmar un despliegue específico
 
 
 @app.get("/")
@@ -509,20 +509,26 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
         ) or "Sin registros previos relevantes."
 
         def _sustituir_marcadores(texto: str) -> str:
-            """Reemplaza cada [F<n>] por la página/sección real de ESE
-            fragmento específico — determinístico, nunca lo escribe el modelo.
+            """Reemplaza cada F<n> (con o sin corchetes) por la página/sección
+            real de ESE fragmento específico — determinístico, nunca lo
+            escribe el modelo.
+
+            BUG REAL encontrado hoy: la sustitución exigía los corchetes
+            literales "[F1]" — pero el modelo a veces escribe el marcador
+            SIN corchetes ("F1" a secas), sobre todo en respuestas cortas
+            y casuales. Cuando eso pasaba, la sustitución nunca lo
+            reconocía, y el texto crudo "F1"/"F3"/"F4" se quedaba tal cual
+            en la respuesta final, sin convertirse en una cita real — se
+            confirmó con los fragmentos reales de un catálogo que "F1" no
+            aparece en ningún lado como texto propio del documento, así
+            que definitivamente era nuestro marcador, no un código del
+            catálogo. Ahora el patrón acepta el corchete como opcional en
+            ambos lados.
+
             Si hay más de un documento entre los fragmentos REALMENTE
             CITADOS (no solo los que se ofrecieron como candidatos), también
-            agrega el nombre del documento — con uno solo, se omite.
-
-            BUG REAL encontrado hoy: antes se contaba sobre TODOS los
-            fragmentos candidatos (mapa_fragmentos.values()), no solo los
-            usados — con dos documentos activos en la base (ej. el plan de
-            turismo y el manual CLIA 1000), la búsqueda podía traer
-            candidatos de ambos aunque la respuesta final solo citara uno,
-            mostrando el nombre del documento de forma redundante cuando en
-            realidad no hacía falta."""
-            marcadores_en_texto = set(re.findall(r"\[(F\d+)\]", texto))
+            agrega el nombre del documento — con uno solo, se omite."""
+            marcadores_en_texto = set(m[0] or m[1] for m in re.findall(r"\[(F\d+)\]|\b(F\d+)\b", texto))
             nombres_documentos = {
                 mapa_fragmentos[m].get('nombre_documento')
                 for m in marcadores_en_texto
@@ -531,10 +537,10 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
             mostrar_documento = len(nombres_documentos) > 1
 
             def _reemplazo(m):
-                marcador = m.group(1)
+                marcador = m.group(1) or m.group(2)
                 f = mapa_fragmentos.get(marcador)
                 if not f:
-                    return ""  # marcador inventado que no existe — se borra, no se deja pasar
+                    return m.group(0)  # no es uno de nuestros marcadores conocidos — se deja tal cual, no se borra a ciegas
                 metadata = f.get('metadata') or {}
                 p_ini = f.get('pagina_inicio') or metadata.get('pagina_inicio')
                 p_fin = f.get('pagina_fin') or metadata.get('pagina_fin') or p_ini
@@ -544,7 +550,7 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
                 pagina_str = f"pág. {p_ini}" if p_ini == p_fin else f"págs. {p_ini}-{p_fin}"
                 doc_str = f"{f.get('nombre_documento')}, " if mostrar_documento else ""
                 return f"({doc_str}{pagina_str}{', sección ' + seccion if seccion else ''})"
-            return re.sub(r"\[(F\d+)\]", _reemplazo, texto)
+            return re.sub(r"\[(F\d+)\]|\b(F\d+)\b", _reemplazo, texto)
 
         # En modo profundo, si los documentos involucrados tienen un
         # índice detectado en la ingesta, se lo damos al modelo como mapa
@@ -646,9 +652,14 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
                 "- Las comillas son un compromiso literal: solo cita entre comillas texto que aparece "
                 "exactamente así en los fragmentos. Nunca inventes una frase o adjetivo que 'suene' al "
                 "documento y la pongas entre comillas — si no la encuentras literal, no la cites.\n"
-                "- Si necesitas referenciar la página de un dato, no escribas tú el número — coloca "
-                "SOLO el marcador del fragmento (ej. [F2]) inmediatamente después del dato, SIN "
-                "paréntesis ni la palabra \"pág.\" alrededor tuyo — el sistema reemplaza el marcador "
+                "- CITAR ES OBLIGATORIO, NUNCA OPCIONAL: toda afirmación factual que venga de un "
+                "fragmento — sin excepción, sin importar qué tan simple o corta sea la pregunta — debe "
+                "llevar SU marcador correspondiente (ej. [F2]) inmediatamente después. No es una opción "
+                "para cuando \"crees que hace falta\" — es obligatorio en cada dato, cada vez, incluso en "
+                "respuestas cortas de una sola oración. Escribe el marcador SIEMPRE con sus corchetes "
+                "literales, tal cual: \"[F2]\", nunca solo \"F2\" sin corchetes — los corchetes son parte "
+                "necesaria del marcador, no una decoración opcional. Coloca SOLO el marcador así escrito, "
+                "SIN paréntesis ni la palabra \"pág.\" alrededor tuyo — el sistema reemplaza el marcador "
                 "completo por la cita final YA lista, con sus propios paréntesis y el número de página "
                 "real incluidos (ej. [F2] se convierte en \"(pág. 45)\"). Si tú además le pones tus "
                 "propios paréntesis, queda una cita duplicada y rota, como \"(pág. (pág. 45))\".\n"
@@ -703,7 +714,7 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
         # se avisa explícitamente en vez de entregar una respuesta que
         # parece segura sin serlo.
         if contexto_fragmentos and respuesta:
-            resultado_verif = verificacion.verificar_respuesta(respuesta, contexto_fragmentos)
+            resultado_verif = verificacion.verificar_respuesta(respuesta, contexto_fragmentos, exigir_marcador_de_cita=not modo_profundo)
             if not resultado_verif["ok"]:
                 logger.warning(f"Verificación falló: {resultado_verif}")
                 instruccion_correctiva = verificacion.construir_instruccion_correctiva(resultado_verif)
@@ -714,7 +725,7 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
                 try:
                     respuesta_corregida_bruta = await gemini_client.generar_respuesta(contents_correccion, usar_url_context=False, system_instruction=system_prompt, response_schema=esquema)
                     respuesta_corregida = _procesar_salida(respuesta_corregida_bruta)
-                    resultado_verif_2 = verificacion.verificar_respuesta(respuesta_corregida, contexto_fragmentos)
+                    resultado_verif_2 = verificacion.verificar_respuesta(respuesta_corregida, contexto_fragmentos, exigir_marcador_de_cita=not modo_profundo)
                     respuesta = respuesta_corregida
                     if not resultado_verif_2["ok"]:
                         respuesta += (

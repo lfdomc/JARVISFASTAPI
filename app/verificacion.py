@@ -17,7 +17,11 @@ import unicodedata
 PATRON_COMILLAS = re.compile(r'["“”«»]([^"“”«»]{15,})["“”«»]')
 PATRON_PAGINA = re.compile(r'p[aá]g(?:s|ina[s]?)?\.?\s*(\d+)(?:\s*[-–—]\s*(\d+))?', re.IGNORECASE)
 PATRON_PARENTESIS = re.compile(r'\(([^()]*)\)')
+PATRON_MARCADOR_CITA = re.compile(r'\[F\d+\]|\bF\d+\b')  # con o sin corchetes —
+# el modelo a veces escribe el marcador sin corchetes, confirmado con un caso real
 VENTANA_BUSQUEDA_PAGINA = 200  # caracteres después de la cita donde se busca su "(pág. N)"
+LARGO_MINIMO_PARA_EXIGIR_CITA = 80  # respuestas más cortas que esto (ej.
+# saludos, "no tengo esa información") no necesariamente requieren cita
 
 # Números "clave" — porcentajes y cantidades grandes — son exactamente el
 # tipo de dato que se escapaba del verificador cuando el modelo parafrasea
@@ -77,8 +81,21 @@ def _numero_respaldado(digitos: str, texto_fragmentos_compacto: str) -> bool:
     return bool(patron_ventana.search(texto_fragmentos_compacto))
 
 
-def verificar_respuesta(respuesta: str, fragmentos: list[dict]) -> dict:
+def verificar_respuesta(respuesta: str, fragmentos: list[dict], exigir_marcador_de_cita: bool = False) -> dict:
     """
+    exigir_marcador_de_cita: solo debe activarse para modo rápido, ANTES
+    de sustituir los marcadores [F<n>] — en modo profundo la cita ya se
+    ensambla por construcción (ver _ensamblar_respuesta_estructurada),
+    así que ahí no aplica.
+
+    BUG REAL encontrado hoy: la instrucción decía "SI necesitas citar la
+    página..." — dejaba la decisión de citar o no a criterio del modelo,
+    y terminaba respondiendo varias preguntas legítimas sin ningún
+    marcador ni la línea de "Fuentes" al final, de forma inconsistente
+    (la misma pregunta, dos veces, con y sin cita). La instrucción ya se
+    corrigió para ser obligatoria — esto es la red de seguridad a nivel
+    de código, para el caso de que el modelo la ignore de todas formas.
+
     Devuelve:
     {
       "ok": bool,
@@ -87,6 +104,7 @@ def verificar_respuesta(respuesta: str, fragmentos: list[dict]) -> dict:
           {"cita": str, "pagina_citada": int, "pagina_real": str, "seccion_real": str|None}, ...
       ],
       "paginas_no_verificadas": [int, ...],
+      "sin_ninguna_cita": bool,
     }
     """
     texto_fragmentos_normalizado = _normalizar(
@@ -169,9 +187,17 @@ def verificar_respuesta(respuesta: str, fragmentos: list[dict]) -> dict:
         if not _numero_respaldado(digitos, fragmentos_compacto) and numero_texto not in numeros_no_verificados:
             numeros_no_verificados.append(numero_texto)
 
+    sin_ninguna_cita = (
+        exigir_marcador_de_cita
+        and len(fragmentos) > 0
+        and len(respuesta.strip()) >= LARGO_MINIMO_PARA_EXIGIR_CITA
+        and not PATRON_MARCADOR_CITA.search(respuesta)
+    )
+
     ok = (
         not citas_no_verificadas and not citas_pagina_incorrecta
         and not paginas_no_verificadas and not numeros_no_verificados
+        and not sin_ninguna_cita
     )
     return {
         "ok": ok,
@@ -179,6 +205,7 @@ def verificar_respuesta(respuesta: str, fragmentos: list[dict]) -> dict:
         "citas_pagina_incorrecta": citas_pagina_incorrecta,
         "paginas_no_verificadas": paginas_no_verificadas,
         "numeros_no_verificados": numeros_no_verificados,
+        "sin_ninguna_cita": sin_ninguna_cita,
     }
 
 
@@ -218,6 +245,15 @@ def construir_instruccion_correctiva(resultado: dict) -> str:
             f"- Estos números NO se encontraron en ningún fragmento recuperado: {lista}. Revisa si los "
             "escribiste mal, si los confundiste con un dato distinto, o si los inventaste — corrígelos "
             "usando el número exacto del fragmento correspondiente, o quítalos si no puedes verificarlos."
+        )
+
+    if resultado.get("sin_ninguna_cita"):
+        partes.append(
+            "- Tu respuesta no incluye NINGÚN marcador de cita (ej. [F2]), aunque hay fragmentos "
+            "disponibles y la respuesta es lo bastante sustancial como para requerir uno. Citar es "
+            "OBLIGATORIO en cada dato factual, no opcional. Reescribe la respuesta agregando el marcador "
+            "del fragmento correspondiente inmediatamente después de cada afirmación que provenga de la "
+            "base de conocimiento."
         )
 
     partes.append("Genera la respuesta corregida completa, manteniendo el resto igual.")
