@@ -269,7 +269,7 @@ def _normalizar_para_cache(texto: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[¿?¡!.,;:\"'()\[\]{}]", "", texto.lower())).strip()
 
 
-VERSION_BACKEND = "2026-09-07-marcador-sin-corchetes"  # cámbialo cada vez que quieras confirmar un despliegue específico
+VERSION_BACKEND = "2026-09-08-no-reciclar-hechos-del-historial"  # cámbialo cada vez que quieras confirmar un despliegue específico
 
 
 @app.get("/")
@@ -583,6 +583,14 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
                 "fragmentos numerados desde cero — un número de fragmento de una respuesta anterior no "
                 "corresponde al mismo fragmento en esta respuesta. Si necesitas citar un dato otra vez, "
                 "vuelve a identificar su número entre los fragmentos de ESTA pregunta.\n"
+                "- MÁS IMPORTANTE AÚN: esto aplica también al CONTENIDO, no solo al número del marcador. "
+                "Nunca repitas ni parafrasees un hecho que dijiste en un turno anterior dando por sentado "
+                "que sigue siendo válido — la base de conocimiento puede haber cambiado entre un turno y "
+                "otro (un documento pudo archivarse, actualizarse, o dejar de estar disponible). Cada "
+                "afirmación factual de ESTA respuesta debe estar respaldada por los [FRAGMENTOS "
+                "RECUPERADOS] de ESTE turno específico — si algo que mencionaste antes ya NO aparece en "
+                "los fragmentos actuales, no lo repitas como si fuera un hecho verificado; dile al usuario "
+                "que esa información ya no está disponible en la base de conocimiento actual.\n"
                 "- Analiza TODOS los fragmentos provistos antes de responder.\n"
                 "- RESPUESTA ESTRUCTURADA A PREGUNTAS ESTRUCTURADAS: si preguntan específicamente por una "
                 "SECCIÓN (ej. \"¿qué nombre tiene la sección 3.5?\"), el PRIMER elemento del arreglo debe "
@@ -647,7 +655,14 @@ async def webhook_telegram(request: Request, x_telegram_bot_api_secret_token: st
                 "relevante solo por acortar: si la pregunta requiere una respuesta con varios datos o "
                 "matices, dala completa. Ajusta el largo a lo que la pregunta realmente necesita, sin "
                 "agregar contexto adicional que no fue solicitado.\n"
-                "- Mantén coherencia con los últimos intercambios del chat.\n"
+                "- Mantén coherencia con los últimos intercambios del chat — pero esto es solo para el "
+                "HILO de la conversación, nunca para dar por sentado que un hecho mencionado antes sigue "
+                "siendo válido ahora. La base de conocimiento puede cambiar entre un turno y otro (un "
+                "documento pudo archivarse o actualizarse). Toda afirmación factual de ESTA respuesta debe "
+                "estar respaldada por los fragmentos de ESTE turno específico — si algo que mencionaste "
+                "antes ya no aparece en los fragmentos actuales, no lo repitas como si fuera un hecho "
+                "verificado; dile al usuario que esa información ya no está disponible en la base de "
+                "conocimiento actual.\n"
                 "- Si la base de conocimiento no tiene la respuesta, dilo claramente en vez de inventar.\n"
                 "- Las comillas son un compromiso literal: solo cita entre comillas texto que aparece "
                 "exactamente así en los fragmentos. Nunca inventes una frase o adjetivo que 'suene' al "
